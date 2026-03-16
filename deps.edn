@@ -1,0 +1,1 @@
+{:deps {org.openjfx/javafx-graphics {:mvn/version "25.0.2"}}}

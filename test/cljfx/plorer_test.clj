@@ -30,6 +30,9 @@
       (.add (.getChildren group) child))
     group))
 
+(defn- tree-els [tree]
+  (map :el (tree-seq (comp seq :children) :children tree)))
+
 (deftest props-reads-supported-properties
   (let [el (doto (Text. "Hello")
              (.setId "greeting"))]
@@ -135,6 +138,27 @@
                         :props {:visible true}
                         :children []}]}
            result))))
+
+(deftest tree-defaults-to-root-and-accepts-keyword-first-options
+  (let [stage (fx-sync
+                (fn open-stage []
+                  (doto (Stage.)
+                    (.setScene (Scene. (group)))
+                    (.show))))]
+    (try
+      (is (some #{stage} (tree-els (plorer/tree))))
+      (is (some #{stage} (tree-els (plorer/tree :props [:id]))))
+      (let [children (:children (plorer/tree :depth 1 :props [:id]))]
+        (is (some #{stage} (map :el children)))
+        (is (every? empty? (map :children children))))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest tree-uses-arg-count-only-for-normalization
+  (is (= {:el :props
+          :children []}
+         (plorer/tree :props))))
 
 (deftest root-children-include-open-windows
   (let [stage (fx-sync

@@ -1,4 +1,22 @@
 (ns cljfx.plorer
+  "Inspect and query JavaFX scene graphs from Clojure.
+   
+  `el` is a scene graph element, e.g., Node, Window, or Scene.
+
+  Public entry points:
+  - `props` for reading supported properties from an el
+  - `tree` for building a nested representation of an el and its children
+  - `all` and `one` for querying the live JavaFX graph
+
+  Examples:
+
+  ```clojure
+  (props el :only [:id :text])
+  (tree)
+  (tree el :props [:id])
+  (all Text)
+  (one \"#root\")
+  ```"
   (:require [clojure.string :as str])
   (:import [java.beans Introspector]
            [java.lang.reflect Method Modifier]
@@ -13,7 +31,7 @@
 
 ;; region util
 
-(defmacro on-ui-thread [& body]
+(defmacro ^:private on-ui-thread [& body]
   `(if (Platform/isFxApplicationThread)
      (do ~@body)
      (let [result# (promise)]
@@ -68,9 +86,15 @@
         (.getMethods ^Class class)))))
 
 (defn props
-  "Return a map of supported props to current values for an element.
-  Pass :only with a collection of prop keys to limit reads. Unsupported
-  keys are omitted; supported keys with nil values are included."
+  "Return supported property values for `el`.
+
+  Use `:only` to limit keys. Unsupported keys are omitted; nil values are kept.
+
+  Example:
+
+  ```clojure
+  (props text-el :only [:text :id])
+  ```"
   [el & {:keys [only]}]
   (on-ui-thread
     (let [prop-getters (class-prop-getters (class el))]
@@ -95,26 +119,39 @@
   SubScene (-children [sub-scene] (cond-> [] (.getRoot sub-scene) (conj (.getRoot sub-scene))))
   Object (-children [_] []))
 
-(defn tree
-  "Return a tree rooted at el. Pass :depth to limit recursion and :props
-  to include selected props at each node."
-  [el & {:keys [depth] prop-keys :props}]
-  (on-ui-thread
-    (let [next-depth (when (some? depth) (dec depth))]
-      (cond-> {:el el}
-        prop-keys
-        (assoc :props (props el :only prop-keys))
+(def ^:private ROOT (reify ChildLookup (-children [_] (vec (Window/getWindows)))))
 
-        (not (and (some? depth) (zero? depth)))
-        (assoc :children (mapv (fn child->tree [child]
-                                 (tree child :depth next-depth :props prop-keys))
-                               (-children el)))))))
+(defn ^{:arglists '([el? & {:keys [depth props]}])} tree
+  "Return a tree rooted at `el`.
+
+  With no `el`, uses all open windows.
+  Use `:depth` to limit recursion and `:props` to include selected props.
+
+  Examples:
+
+  ```clojure
+  (tree node :props [:id])
+  (tree :depth 3 :props [:id :title])
+  ```"
+  [& args]
+  (let [[el options] (if (even? (count args))
+                       [ROOT args]
+                       [(first args) (next args)])
+        {:keys [depth] prop-keys :props} (apply hash-map options)]
+    (on-ui-thread
+      (let [next-depth (when (some? depth) (dec depth))]
+        (cond-> {:el el}
+          prop-keys
+          (assoc :props (props el :only prop-keys))
+
+          (not (and (some? depth) (zero? depth)))
+          (assoc :children (mapv (fn child->tree [child]
+                                   (tree child :depth next-depth :props prop-keys))
+                                 (-children el))))))))
 
 ;; endregion
 
 ;; region query
-
-(def ^:private ROOT (reify ChildLookup (-children [_] (vec (Window/getWindows)))))
 
 (defn- query-descendants [el]
   (let [stack (ArrayDeque.)]
@@ -232,11 +269,50 @@
     [ROOT]
     (normalize-query-steps selectors)))
 
-(defn all [& selectors]
+(defn all
+  "Return all matching els for `selectors`.
+
+  Queries start from all open windows and run left to right. `>` makes the
+  next step direct-child only.
+
+  Selector forms:
+  - `Class` matches by `instance?`
+  - `*` matches anything
+  - strings match `#id`, `.style-class`, or `#id.style-class`
+  - functions and vars that resolve to functions are predicates
+  - maps match el properties (equality or predicate)
+
+  Map keys:
+  - ordinary keys compare against el properties
+  - `:fx.plorer/class` adds a type match
+  - `:fx.plorer/pred` adds an el predicate
+  - `:fx.plorer/style-classes` requires all listed CSS classes
+
+  Example:
+
+  ```clojure
+  (all > Window)
+  (all VBox > Text)
+  (all {:id some?})
+  (all \"#id.class.other-class\")
+  (all {:fx.plorer/class Text :id \"title\" :fx.plorer/style-classes #{\"primary\"}})
+  ```"
+  [& selectors]
   (on-ui-thread
     (execute-query selectors)))
 
-(defn one [& selectors]
+(defn one
+  "Return the only matching el for `selectors`.
+
+  Same selector forms as `all`. Throws `IllegalStateException` on 0 or many
+  matches.
+
+  Example:
+
+  ```clojure
+  (one \"#root\")
+  ```"
+  [& selectors]
   (let [results (apply all selectors)]
     (if (= 1 (count results))
       (first results)

@@ -10,7 +10,8 @@
 (defn- start-fx-runtime! []
   (let [started? (promise)]
     (try
-      (Platform/startup #(deliver started? true))
+      (Platform/startup (fn mark-fx-started []
+                          (deliver started? true)))
       (catch IllegalStateException _
         (deliver started? true)))
     @started?))
@@ -19,17 +20,9 @@
   (if (Platform/isFxApplicationThread)
     (f)
     (let [result (promise)]
-      (Platform/runLater
-        (bound-fn []
-          (deliver result
-                   (try
-                     [::ok (f)]
-                     (catch Throwable t
-                       [::err t])))))
+      (Platform/runLater (bound-fn [] (deliver result (try [::ok (f)] (catch Throwable t [::err t]))) (Thread/sleep 50)))
       (let [[status value] @result]
-        (case status
-          ::ok value
-          ::err (throw value))))))
+        (case status ::ok value ::err (throw value))))))
 
 (defn- group [& children]
   (let [group (Group.)]
@@ -145,33 +138,36 @@
 
 (deftest root-children-include-open-windows
   (let [stage (fx-sync
-                #(doto (Stage.)
-                   (.setScene (Scene. (group)))
-                   (.show)))]
+                (fn open-stage []
+                  (doto (Stage.)
+                    (.setScene (Scene. (group)))
+                    (.show))))]
     (try
       (is (some #{stage} (#'plorer/-children @#'plorer/ROOT)))
       (finally
-        (fx-sync #(.close stage))))))
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
 
 (deftest query-all-supports-recursive-and-direct-traversal
   (let [stage (fx-sync
-                #(let [nested-text (doto (Text. "Nested")
-                                     (.setId "nested"))
-                       direct-text (doto (Text. "Direct")
-                                     (.setId "direct"))
-                       name-text (doto (Text. "Name")
-                                   (.setId "name"))
-                       nested-box (doto (VBox. 0.0)
-                                    (.setId "nested-box"))
-                       root (doto (VBox. 0.0)
-                              (.setId "assets"))]
-                   (.add (.getChildren nested-box) nested-text)
-                   (.add (.getStyleClass root) "container")
-                   (.addAll (.getChildren root) [direct-text nested-box name-text])
-                   (.add (.getStyleClass direct-text) "primary")
-                   (doto (Stage.)
-                     (.setScene (Scene. root))
-                     (.show))))]
+                (fn create-stage-with-nested-content []
+                  (let [nested-text (doto (Text. "Nested")
+                                      (.setId "nested"))
+                        direct-text (doto (Text. "Direct")
+                                      (.setId "direct"))
+                        name-text (doto (Text. "Name")
+                                    (.setId "name"))
+                        nested-box (doto (VBox. 0.0)
+                                     (.setId "nested-box"))
+                        root (doto (VBox. 0.0)
+                               (.setId "assets"))]
+                    (.add (.getChildren nested-box) nested-text)
+                    (.add (.getStyleClass root) "container")
+                    (.addAll (.getChildren root) [direct-text nested-box name-text])
+                    (.add (.getStyleClass direct-text) "primary")
+                    (doto (Stage.)
+                      (.setScene (Scene. root))
+                      (.show)))))]
     (try
       (let [root (.getRoot (.getScene stage))
             direct-text (first (.getChildren ^VBox root))
@@ -189,24 +185,27 @@
         (is (= [name-text] (plorer/all {:fx.plorer/class Text :id "name"})))
         (is (= [direct-text] (plorer/all {:fx.plorer/style-classes #{"primary"}})))
         (is (= [root] (plorer/all * > {:id "assets"})))
-        (is (= [direct-text] (plorer/all {:fx.plorer/pred #(instance? Text %)
+        (is (= [direct-text] (plorer/all {:fx.plorer/pred (fn is-text? [el]
+                                                            (instance? Text el))
                                           :text "Direct"}))))
       (finally
-        (fx-sync #(.close stage))))))
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
 
 (deftest query-chaining-does-not-match-roots-or-duplicate-descendants
   (let [stage (fx-sync
-                #(let [inner-box (doto (VBox. 0.0)
-                                   (.setId "inner"))
-                       middle-box (doto (VBox. 0.0)
-                                    (.setId "middle"))
-                       outer-box (doto (VBox. 0.0)
-                                   (.setId "outer"))]
-                   (.add (.getChildren middle-box) inner-box)
-                   (.add (.getChildren outer-box) middle-box)
-                   (doto (Stage.)
-                     (.setScene (Scene. outer-box))
-                     (.show))))]
+                (fn create-stage-with-nested-boxes []
+                  (let [inner-box (doto (VBox. 0.0)
+                                    (.setId "inner"))
+                        middle-box (doto (VBox. 0.0)
+                                     (.setId "middle"))
+                        outer-box (doto (VBox. 0.0)
+                                    (.setId "outer"))]
+                    (.add (.getChildren middle-box) inner-box)
+                    (.add (.getChildren outer-box) middle-box)
+                    (doto (Stage.)
+                      (.setScene (Scene. outer-box))
+                      (.show)))))]
     (try
       (let [root (.getRoot (.getScene stage))
             middle-box (first (.getChildren ^VBox root))
@@ -216,17 +215,19 @@
         (is (= [middle-box inner-box] (plorer/all VBox > VBox)))
         (is (= [inner-box] (plorer/all VBox VBox VBox))))
       (finally
-        (fx-sync #(.close stage))))))
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
 
 (deftest query-one-returns-single-result-and-throws-on-cardinality-mismatch
   (let [stage (fx-sync
-                #(let [text-1 (Text. "One")
-                       text-2 (Text. "Two")
-                       root (VBox. 0.0)]
-                   (.addAll (.getChildren root) [text-1 text-2])
-                   (doto (Stage.)
-                     (.setScene (Scene. root))
-                     (.show))))]
+                (fn create-stage-with-two-texts []
+                  (let [text-1 (Text. "One")
+                        text-2 (Text. "Two")
+                        root (VBox. 0.0)]
+                    (.addAll (.getChildren root) [text-1 text-2])
+                    (doto (Stage.)
+                      (.setScene (Scene. root))
+                      (.show)))))]
     (try
       (is (= stage (plorer/one > Stage)))
       (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"
@@ -234,26 +235,29 @@
       (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"
                             (plorer/one "#missing")))
       (finally
-        (fx-sync #(.close stage))))))
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
 
 (deftest query-works-off-ui-thread
   (let [stage (fx-sync
-                #(let [text (doto (Text. "Async")
-                              (.setId "async"))
-                       root (group text)]
-                   (doto (Stage.)
-                     (.setScene (Scene. root))
-                     (.show))))]
+                (fn create-stage-with-async-text []
+                  (let [text (doto (Text. "Async")
+                               (.setId "async"))
+                        root (group text)]
+                    (doto (Stage.)
+                      (.setScene (Scene. root))
+                      (.show)))))]
     (try
       (is (= [(first (.getChildren ^Group (.getRoot (.getScene stage))))]
              @(future (plorer/all "#async"))))
       (finally
-        (fx-sync #(.close stage))))))
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
 
 (deftest query-map-selector-treats-literal-ifns-as-values
   (let [el (Object.)
-        matcher-for (fn [selector prop-values]
-                      (with-redefs [plorer/props (fn [_ & {:keys [only]}]
+        matcher-for (fn matcher-for-selector [selector prop-values]
+                      (with-redefs [plorer/props (fn stubbed-props [_ & {:keys [only]}]
                                                    (select-keys prop-values only))]
                         ((#'plorer/matcher selector) el)))]
     (testing "literal set values use equality instead of membership"

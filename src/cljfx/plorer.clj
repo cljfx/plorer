@@ -33,9 +33,9 @@
 
 (def ^:private class-prop-getters
   (memoize
-    (fn [class]
+    (fn class->prop-getters [class]
       (reduce
-        (fn [prop-getters ^Method method]
+        (fn collect-method-prop-getters [prop-getters ^Method method]
           (let [method-name (.getName method)]
             (cond
               (or (not (zero? (.getParameterCount method)))
@@ -48,7 +48,7 @@
               (let [prop-key (bean-stem->prop-key
                                (subs method-name 0 (- (count method-name) (count "Property"))))]
                 (assoc prop-getters prop-key
-                       (fn [el]
+                       (fn read-observable-property [el]
                          (when-some [^ObservableValue value
                                      (.invoke method el (object-array 0))]
                            (.getValue value)))))
@@ -59,7 +59,7 @@
               (let [prop-key (bean-stem->prop-key
                                (Introspector/decapitalize (subs method-name (count "get"))))]
                 (assoc prop-getters prop-key
-                       (fn [el]
+                       (fn read-observable-list-property [el]
                          (.invoke method el (object-array 0)))))
 
               :else
@@ -75,7 +75,7 @@
   (on-ui-thread
     (let [prop-getters (class-prop-getters (class el))]
       (reduce
-        (fn [m prop-key]
+        (fn assoc-supported-prop [m prop-key]
           (if-some [getter (get prop-getters prop-key)]
             (assoc m prop-key (getter el))
             m))
@@ -106,7 +106,9 @@
         (assoc :props (props el :only prop-keys))
 
         (not (and (some? depth) (zero? depth)))
-        (assoc :children (mapv #(tree % :depth next-depth :props prop-keys) (-children el)))))))
+        (assoc :children (mapv (fn child->tree [child]
+                                 (tree child :depth next-depth :props prop-keys))
+                               (-children el)))))))
 
 ;; endregion
 
@@ -153,48 +155,49 @@
         class (:fx.plorer/class selector)
         style-classes (:fx.plorer/style-classes selector)
         prop-keys (cond-> (reduce-kv
-                            (fn [prop-keys prop-key _]
+                            (fn collect-prop-key [prop-keys prop-key _]
                               (conj prop-keys prop-key))
                             []
                             prop-selector)
                     style-classes (conj :style-class))
         read-props (if (seq prop-keys)
-                     (fn [el]
+                     (fn read-selected-props [el]
                        (props el :only prop-keys))
                      (constantly nil))
         preds (cond-> []
                 class
-                (conj #(instance? class %))
+                (conj (fn matches-class? [el]
+                        (instance? class el)))
 
                 pred
-                (conj #(boolean (pred %)))
+                (conj (fn matches-selector-pred? [el]
+                        (boolean (pred el))))
 
                 (seq prop-keys)
                 (conj (let [prop-preds
                             (cond-> (reduce-kv
-                                      (fn [prop-checks prop-key expected]
+                                      (fn build-prop-check [prop-checks prop-key expected]
                                         (conj prop-checks
                                               (if (or (fn? expected) (var? expected))
-                                                (fn [prop-values]
+                                                (fn matches-prop-predicate? [prop-values]
                                                   (and (contains? prop-values prop-key)
                                                        (boolean (expected (get prop-values prop-key)))))
-                                                (fn [prop-values]
+                                                (fn matches-prop-value? [prop-values]
                                                   (and (contains? prop-values prop-key)
                                                        (= expected (get prop-values prop-key)))))))
                                       []
                                       prop-selector)
                               style-classes
-                              (conj (fn [prop-values]
+                              (conj (fn has-style-classes? [prop-values]
                                       (let [actual-style-classes (:style-class prop-values)]
                                         (and (contains? prop-values :style-class)
                                              (every? (set actual-style-classes) style-classes))))))]
-                        (case (count prop-preds)
-                          0 any?
-                          1 (let [prop-pred (prop-preds 0)]
-                              (fn [el]
-                                (prop-pred (read-props el))))
+                        (if (= 1 (count prop-preds))
+                          (let [prop-pred (prop-preds 0)]
+                            (fn matches-single-prop-pred? [el]
+                              (prop-pred (read-props el))))
                           (let [prop-pred (apply every-pred prop-preds)]
-                            (fn [el]
+                            (fn matches-all-prop-preds? [el]
                               (prop-pred (read-props el))))))))]
     (case (count preds)
       0 any?
@@ -218,10 +221,11 @@
 
 (defn- execute-query [selectors]
   (reduce
-    (fn [els {:keys [direct match]}]
+    (fn execute-step [els {:keys [direct match]}]
       (into []
             (comp
-              (mapcat #(if direct (-children %) (query-descendants %)))
+              (mapcat (fn step-children-or-descendants [el]
+                        (if direct (-children el) (query-descendants el))))
               (filter match)
               (distinct))
             els))
@@ -233,11 +237,10 @@
     (execute-query selectors)))
 
 (defn one [& selectors]
-  (on-ui-thread
-    (let [results (execute-query selectors)]
-      (if (= 1 (count results))
-        (first results)
-        (throw (IllegalStateException.
-                 (str "Expected exactly one match, got " (count results))))))))
+  (let [results (apply all selectors)]
+    (if (= 1 (count results))
+      (first results)
+      (throw (IllegalStateException.
+               (str "Expected exactly one match, got " (count results)))))))
 
 ;; endregion

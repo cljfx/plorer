@@ -124,8 +124,8 @@
   SubScene (-children [sub-scene] (cond-> [] (.getRoot sub-scene) (conj (.getRoot sub-scene))))
   Object (-children [_] []))
 
-(def ^:private ROOT 
-  (reify 
+(def ^:private ROOT
+  (reify
     Object
     (toString [_] "cljfx.plorer/ROOT")
     ChildLookup

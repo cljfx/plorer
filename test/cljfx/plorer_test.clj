@@ -300,6 +300,18 @@
       (is (true? (matcher-for {:value #'string?} {:value "x"})))
       (is (false? (matcher-for {:value #'string?} {:value 1}))))))
 
+(deftest query-bare-predicate-selectors-only-accept-fns-and-vars
+  (is (= #:fx.plorer{:pred string?}
+         (#'plorer/canonicalize-selector string?)))
+  (is (= #:fx.plorer{:pred #'string?}
+         (#'plorer/canonicalize-selector #'string?)))
+  (is (thrown-with-msg? IllegalArgumentException #"Unsupported selector: :id"
+                        (#'plorer/canonicalize-selector :id)))
+  (is (thrown-with-msg? IllegalArgumentException #"Unsupported selector: #\{:a\}"
+                        (#'plorer/canonicalize-selector #{:a})))
+  (is (thrown-with-msg? IllegalArgumentException #"Unsupported selector: \[:a\]"
+                        (#'plorer/canonicalize-selector [:a]))))
+
 (defn test-ns-hook []
   (start-fx-runtime!)
   (try

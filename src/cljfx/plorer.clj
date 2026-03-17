@@ -199,7 +199,7 @@
     (instance? Class selector) {:fx.plorer/class selector}
     (= selector *) {}
     (string? selector) (parse-string-selector selector)
-    (ifn? selector) {:fx.plorer/pred selector}
+    (or (fn? selector) (var? selector)) {:fx.plorer/pred selector}
     :else (throw (IllegalArgumentException. (str "Unsupported selector: " selector)))))
 
 (defn- matcher [selector]

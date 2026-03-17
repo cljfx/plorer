@@ -112,11 +112,22 @@ No bare text strings; use `{:text "Save"}` explicitly. Separate selector steps m
 
 ## Inputs
 
-api on nodes:
-click! - what about double clicks?
-scroll!
-key! - or key combo? should allow modifiers...
-type!
+```clojure
+(mouse-press! el :primary)
+(mouse-release! el :primary)
 
-maybe:
-drag! (from / to)
+(key-press! el :enter)
+(key-release! el :enter)
+```
+
+Inputs are synthetic JavaFX events with user-like semantics, not real desktop input.
+
+- minimal v1 API is `mouse-press!`, `mouse-release!`, `key-press!`, `key-release!`
+- all input fns return a plain result map on success and throw `ex-info` on failure
+- mouse targets the center of `el`
+- mouse/key dispatch is meant to be close to user interaction, not raw `fireEvent` on arbitrary targets
+- input must fail when `el` is detached, not shown in a scene/window, or otherwise cannot be interacted with as intended
+- mouse input also fails if interacting at `el`'s center does not make focus move to `el` or within `el`, e.g. when the point is covered by something else
+- key input is element-scoped for context and asserts that `el` is focused or contains the current focus owner before dispatch
+- `key-press!` fires `KEY_PRESSED` and then optionally `KEY_TYPED` if typeable, `key-release!` fires `KEY_RELEASED`;
+- if `mouse-press!` dispatches a press but later fails validation, it must dispatch a matching release before throwing

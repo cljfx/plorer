@@ -1,0 +1,3 @@
+{:function-arguments-indentation :cursive
+ :remove-multiple-non-indenting-spaces? true
+ :sort-ns-references? true}

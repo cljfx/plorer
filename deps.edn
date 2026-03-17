@@ -1,1 +1,12 @@
-{:deps {org.openjfx/javafx-graphics {:mvn/version "25.0.2"}}}
+{:deps {org.openjfx/javafx-graphics {:mvn/version "25.0.2"}}
+ :aliases
+ {:fmt
+  {:extra-deps {dev.weavejester/cljfmt {:mvn/version "0.16.2"}}
+   :main-opts ["-m" "cljfmt.main"]}
+  :test
+  {:extra-paths ["test"]
+   :extra-deps {com.cognitect/test-runner
+                {:git/url "https://github.com/cognitect-labs/test-runner"
+                 :git/tag "v0.5.1"
+                 :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner"]}}}

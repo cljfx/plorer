@@ -9,3 +9,7 @@ clojure -M:fmt fix src test
 ```bash
 clojure -M:test
 ```
+
+# Git
+
+Only read-only use

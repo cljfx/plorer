@@ -123,7 +123,7 @@ No bare text strings; use `{:text "Save"}` explicitly. Separate selector steps m
 Inputs are synthetic JavaFX events with user-like semantics, not real desktop input.
 
 - minimal v1 API is `mouse-press!`, `mouse-release!`, `key-press!`, `key-release!`
-- all input fns return a plain result map on success and throw `ex-info` on failure
+- all input fns return a plain result map on success and throw exception on failure
 - mouse targets the center of `el`
 - mouse/key dispatch is meant to be close to user interaction, not raw `fireEvent` on arbitrary targets
 - input must fail when `el` is detached, not shown in a scene/window, or otherwise cannot be interacted with as intended

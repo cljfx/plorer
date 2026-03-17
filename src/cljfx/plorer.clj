@@ -2,6 +2,7 @@
   (:require [clojure.string :as str])
   (:import [java.beans Introspector]
            [java.lang.reflect Method Modifier]
+           [java.util ArrayDeque]
            [javafx.application Platform]
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
@@ -112,5 +113,131 @@
 ;; region query
 
 (def ^:private ROOT (reify ChildLookup (-children [_] (vec (Window/getWindows)))))
+
+(defn- query-descendants [el]
+  (let [stack (ArrayDeque.)]
+    (loop [result (transient [])
+           children (-children el)]
+      (doseq [child (rseq (vec children))]
+        (.push stack child))
+      (if (.isEmpty stack)
+        (persistent! result)
+        (let [node (.pop stack)]
+          (recur (conj! result node) (-children node)))))))
+
+(defn- parse-string-selector [selector]
+  (let [parts (str/split selector #"\." -1)]
+    (cond
+      (and (str/starts-with? selector "#") (every? seq parts))
+      (cond-> {:id (subs (first parts) 1)} (next parts) (assoc :fx.plorer/style-classes (set (next parts))))
+
+      (and (str/starts-with? selector ".") (empty? (first parts)) (every? seq (rest parts)))
+      {:fx.plorer/style-classes (set (rest parts))}
+
+      :else
+      (throw (IllegalArgumentException. (str "Unsupported string selector: " selector))))))
+
+(defn- canonicalize-selector [selector]
+  (cond
+    (map? selector) selector
+    (instance? Class selector) {:fx.plorer/class selector}
+    (= selector *) {}
+    (string? selector) (parse-string-selector selector)
+    (ifn? selector) {:fx.plorer/pred selector}
+    :else (throw (IllegalArgumentException. (str "Unsupported selector: " selector)))))
+
+(defn- matcher [selector]
+  (let [selector (canonicalize-selector selector)
+        prop-selector (dissoc selector :fx.plorer/class :fx.plorer/pred :fx.plorer/style-classes)
+        pred (:fx.plorer/pred selector)
+        class (:fx.plorer/class selector)
+        style-classes (:fx.plorer/style-classes selector)
+        prop-keys (cond-> (reduce-kv
+                            (fn [prop-keys prop-key _]
+                              (conj prop-keys prop-key))
+                            []
+                            prop-selector)
+                    style-classes (conj :style-class))
+        read-props (if (seq prop-keys)
+                     (fn [el]
+                       (props el :only prop-keys))
+                     (constantly nil))
+        preds (cond-> []
+                class
+                (conj #(instance? class %))
+
+                pred
+                (conj #(boolean (pred %)))
+
+                (seq prop-keys)
+                (conj (let [prop-preds
+                            (cond-> (reduce-kv
+                                      (fn [prop-checks prop-key expected]
+                                        (conj prop-checks
+                                              (if (or (fn? expected) (var? expected))
+                                                (fn [prop-values]
+                                                  (and (contains? prop-values prop-key)
+                                                       (boolean (expected (get prop-values prop-key)))))
+                                                (fn [prop-values]
+                                                  (and (contains? prop-values prop-key)
+                                                       (= expected (get prop-values prop-key)))))))
+                                      []
+                                      prop-selector)
+                              style-classes
+                              (conj (fn [prop-values]
+                                      (let [actual-style-classes (:style-class prop-values)]
+                                        (and (contains? prop-values :style-class)
+                                             (every? (set actual-style-classes) style-classes))))))]
+                        (case (count prop-preds)
+                          0 any?
+                          1 (let [prop-pred (prop-preds 0)]
+                              (fn [el]
+                                (prop-pred (read-props el))))
+                          (let [prop-pred (apply every-pred prop-preds)]
+                            (fn [el]
+                              (prop-pred (read-props el))))))))]
+    (case (count preds)
+      0 any?
+      1 (preds 0)
+      (apply every-pred preds))))
+
+(defn- normalize-query-steps [selectors]
+  (loop [selectors selectors
+         direct false
+         steps []]
+    (if-some [selector (first selectors)]
+      (if (= selector >)
+        (do
+          (when (empty? (rest selectors))
+            (throw (IllegalArgumentException. "Query selector cannot end with >")))
+          (recur (rest selectors) true steps))
+        (recur (rest selectors)
+               false
+               (conj steps {:direct direct :match (matcher selector)})))
+      steps)))
+
+(defn- execute-query [selectors]
+  (reduce
+    (fn [els {:keys [direct match]}]
+      (into []
+            (comp
+              (mapcat #(if direct (-children %) (query-descendants %)))
+              (filter match)
+              (distinct))
+            els))
+    [ROOT]
+    (normalize-query-steps selectors)))
+
+(defn all [& selectors]
+  (on-ui-thread
+    (execute-query selectors)))
+
+(defn one [& selectors]
+  (on-ui-thread
+    (let [results (execute-query selectors)]
+      (if (= 1 (count results))
+        (first results)
+        (throw (IllegalStateException.
+                 (str "Expected exactly one match, got " (count results))))))))
 
 ;; endregion

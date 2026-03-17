@@ -3,8 +3,9 @@
             [clojure.test :as t :refer [deftest is testing]])
   (:import [javafx.application Platform]
            [javafx.scene Group Scene SubScene]
+           [javafx.scene.layout VBox]
            [javafx.scene.text Text]
-           [javafx.stage Stage]))
+           [javafx.stage Stage Window]))
 
 (defn- start-fx-runtime! []
   (let [started? (promise)]
@@ -151,6 +152,125 @@
       (is (some #{stage} (#'plorer/-children @#'plorer/ROOT)))
       (finally
         (fx-sync #(.close stage))))))
+
+(deftest query-all-supports-recursive-and-direct-traversal
+  (let [stage (fx-sync
+                #(let [nested-text (doto (Text. "Nested")
+                                     (.setId "nested"))
+                       direct-text (doto (Text. "Direct")
+                                     (.setId "direct"))
+                       name-text (doto (Text. "Name")
+                                   (.setId "name"))
+                       nested-box (doto (VBox. 0.0)
+                                    (.setId "nested-box"))
+                       root (doto (VBox. 0.0)
+                              (.setId "assets"))]
+                   (.add (.getChildren nested-box) nested-text)
+                   (.add (.getStyleClass root) "container")
+                   (.addAll (.getChildren root) [direct-text nested-box name-text])
+                   (.add (.getStyleClass direct-text) "primary")
+                   (doto (Stage.)
+                     (.setScene (Scene. root))
+                     (.show))))]
+    (try
+      (let [root (.getRoot (.getScene stage))
+            direct-text (first (.getChildren ^VBox root))
+            nested-box (second (.getChildren ^VBox root))
+            nested-text (first (.getChildren ^VBox nested-box))
+            name-text (.get (.getChildren ^VBox root) 2)]
+        (is (= [stage] (plorer/all > Stage)))
+        (is (= [stage] (plorer/all Window)))
+        (is (= [root] (plorer/all "#assets")))
+        (is (= [root] (plorer/all ".container")))
+        (is (= [root] (plorer/all "#assets.container")))
+        (is (= [direct-text nested-text name-text] (plorer/all Text)))
+        (is (= [direct-text] (plorer/all VBox > {:fx.plorer/class Text :text "Direct"})))
+        (is (= [nested-text] (plorer/all "#nested")))
+        (is (= [name-text] (plorer/all {:fx.plorer/class Text :id "name"})))
+        (is (= [direct-text] (plorer/all {:fx.plorer/style-classes #{"primary"}})))
+        (is (= [root] (plorer/all * > {:id "assets"})))
+        (is (= [direct-text] (plorer/all {:fx.plorer/pred #(instance? Text %)
+                                          :text "Direct"}))))
+      (finally
+        (fx-sync #(.close stage))))))
+
+(deftest query-chaining-does-not-match-roots-or-duplicate-descendants
+  (let [stage (fx-sync
+                #(let [inner-box (doto (VBox. 0.0)
+                                   (.setId "inner"))
+                       middle-box (doto (VBox. 0.0)
+                                    (.setId "middle"))
+                       outer-box (doto (VBox. 0.0)
+                                   (.setId "outer"))]
+                   (.add (.getChildren middle-box) inner-box)
+                   (.add (.getChildren outer-box) middle-box)
+                   (doto (Stage.)
+                     (.setScene (Scene. outer-box))
+                     (.show))))]
+    (try
+      (let [root (.getRoot (.getScene stage))
+            middle-box (first (.getChildren ^VBox root))
+            inner-box (first (.getChildren ^VBox middle-box))]
+        (is (= [root middle-box inner-box] (plorer/all VBox)))
+        (is (= [middle-box inner-box] (plorer/all VBox VBox)))
+        (is (= [middle-box inner-box] (plorer/all VBox > VBox)))
+        (is (= [inner-box] (plorer/all VBox VBox VBox))))
+      (finally
+        (fx-sync #(.close stage))))))
+
+(deftest query-one-returns-single-result-and-throws-on-cardinality-mismatch
+  (let [stage (fx-sync
+                #(let [text-1 (Text. "One")
+                       text-2 (Text. "Two")
+                       root (VBox. 0.0)]
+                   (.addAll (.getChildren root) [text-1 text-2])
+                   (doto (Stage.)
+                     (.setScene (Scene. root))
+                     (.show))))]
+    (try
+      (is (= stage (plorer/one > Stage)))
+      (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"
+                            (plorer/one Text)))
+      (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"
+                            (plorer/one "#missing")))
+      (finally
+        (fx-sync #(.close stage))))))
+
+(deftest query-works-off-ui-thread
+  (let [stage (fx-sync
+                #(let [text (doto (Text. "Async")
+                              (.setId "async"))
+                       root (group text)]
+                   (doto (Stage.)
+                     (.setScene (Scene. root))
+                     (.show))))]
+    (try
+      (is (= [(first (.getChildren ^Group (.getRoot (.getScene stage))))]
+             @(future (plorer/all "#async"))))
+      (finally
+        (fx-sync #(.close stage))))))
+
+(deftest query-map-selector-treats-literal-ifns-as-values
+  (let [el (Object.)
+        matcher-for (fn [selector prop-values]
+                      (with-redefs [plorer/props (fn [_ & {:keys [only]}]
+                                                   (select-keys prop-values only))]
+                        ((#'plorer/matcher selector) el)))]
+    (testing "literal set values use equality instead of membership"
+      (is (true? (matcher-for {:value #{1 2}} {:value #{1 2}})))
+      (is (false? (matcher-for {:value #{1 2}} {:value 1}))))
+    (testing "literal vector values use equality instead of indexed lookup"
+      (is (true? (matcher-for {:value [:a :b]} {:value [:a :b]})))
+      (is (false? (matcher-for {:value [:a :b]} {:value :a}))))
+    (testing "literal map values use equality instead of key lookup"
+      (is (true? (matcher-for {:value {:k :v}} {:value {:k :v}})))
+      (is (false? (matcher-for {:value {:k :v}} {:value :v}))))
+    (testing "functions still act as predicates"
+      (is (true? (matcher-for {:value string?} {:value "x"})))
+      (is (false? (matcher-for {:value string?} {:value 1}))))
+    (testing "vars that resolve to functions still act as predicates"
+      (is (true? (matcher-for {:value #'string?} {:value "x"})))
+      (is (false? (matcher-for {:value #'string?} {:value 1}))))))
 
 (defn test-ns-hook []
   (start-fx-runtime!)

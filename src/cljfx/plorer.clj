@@ -86,13 +86,18 @@
         (.getMethods ^Class class)))))
 
 (defn props
-  "Return supported property values for `el`.
+  "Return a map of supported property values for `el`.
 
-  Use `:only` to limit keys. Unsupported keys are omitted; nil values are kept.
+  Behavior:
+  - returned keys are the supported logical props for `el`
+  - unsupported keys are omitted
+  - supported keys with nil values are included
+  - `:only` limits which keys are read
 
   Example:
 
   ```clojure
+  (props el)
   (props text-el :only [:text :id])
   ```"
   [el & {:keys [only]}]
@@ -119,17 +124,29 @@
   SubScene (-children [sub-scene] (cond-> [] (.getRoot sub-scene) (conj (.getRoot sub-scene))))
   Object (-children [_] []))
 
-(def ^:private ROOT (reify ChildLookup (-children [_] (vec (Window/getWindows)))))
+(def ^:private ROOT 
+  (reify 
+    Object
+    (toString [_] "cljfx.plorer/ROOT")
+    ChildLookup
+    (-children [_] (vec (Window/getWindows)))))
 
 (defn ^{:arglists '([el? & {:keys [depth props]}])} tree
-  "Return a tree rooted at `el`.
+  "Return a tree for `el`, or from the synthetic root when `el` is omitted.
 
-  With no `el`, uses all open windows.
-  Use `:depth` to limit recursion and `:props` to include selected props.
+  Behavior:
+  - with no `el`, traversal starts from the synthetic root
+  - each node always includes `:el`
+  - `:props` is included only when requested
+  - `:children` is included unless `:depth` is 0
+  - `:depth 0` returns just the current node
+  - `:depth 1` includes immediate children
 
   Examples:
 
   ```clojure
+  (tree el)
+  (tree el :depth 1)
   (tree node :props [:id])
   (tree :depth 3 :props [:id :title])
   ```"
@@ -284,7 +301,7 @@
 
   Map keys:
   - ordinary keys compare against el properties
-  - `:fx.plorer/class` adds a type match
+  - `:fx.plorer/class` adds a class match
   - `:fx.plorer/pred` adds an el predicate
   - `:fx.plorer/style-classes` requires all listed CSS classes
 
@@ -316,7 +333,6 @@
   (let [results (apply all selectors)]
     (if (= 1 (count results))
       (first results)
-      (throw (IllegalStateException.
-               (str "Expected exactly one match, got " (count results)))))))
+      (throw (IllegalStateException. (str "Expected exactly one match, got " (count results)))))))
 
 ;; endregion

@@ -41,20 +41,21 @@ This covers both requirements:
 (tree el :props [:id :text :visible])
 ```
 
-`tree` works on a single `el` only.
+`tree` can be called with a single `el`, or with no `el` to start from all open windows.
 
-- signature: `(tree el & {:keys [depth props]})`
+- signature: `(tree [& args])`
 - every tree node includes `:el`, the live object
-- `:children` is always present and comes from the same internal `children` relation used by querying
+- `:children` is included for recursive nodes and comes from the same internal `children` relation used by querying
 - `:props` is included only when requested
 - omitted `:depth` means full recursion
-- `:depth 0` means just this node, `:depth 1` includes immediate children
+- `:depth 0` means just this node, with no `:children` key
 
-The internal `children` relation is uniform across querying and trees. Examples:
+The internal `children` relation is shared across querying and trees. Examples:
 - `Window` -> `[(-> w .getScene)]` when present
 - `Scene` -> `[(-> s .getRoot)]` when present
 - `Parent` -> `getChildrenUnmodifiable()`
-- plus other explorer-visible UI objects like `Tab`, `Menu`, `MenuItem`, etc., as long as they have props and children
+- `SubScene` -> `[(-> s .getRoot)]` when present
+- any other object -> no children
 
 Tree shape:
 
@@ -74,7 +75,6 @@ Tree shape:
 (all "#assets" Label) ;; every label inside assets
 (all VBox > Label) ;; every label directly in VBox
 
-(first {:fx.plorer/class TextField :id "name"})
 (one {:fx.plorer/class Button :text "Save"})
 ```
 
@@ -83,7 +83,6 @@ Roots are all windows.
 
 Semantics:
 - `all` returns a vector of results
-- `first` returns the first result or `nil`
 - `one` returns the result, throws on many/none
 - plain matcher steps traverse descendants
 - `>` switches the next matcher step to non-recursive matching
@@ -106,11 +105,13 @@ Map semantics:
 - `:fx.plorer/class` means Java class predicate
 - `:fx.plorer/pred` means predicate on the whole candidate
 - `:fx.plorer/style-classes` is a set matcher and checks subset inclusion
-- plain keys mean properties; function values are predicates, otherwise equality
+- plain keys mean properties; function values and vars are predicates, otherwise equality
 
 No bare text strings; use `{:text "Save"}` explicitly. Separate selector steps mean path traversal, while a single map means same-element constraints.
 
 ## Inputs
+
+TODO: synthetic mouse/key input helpers are not implemented in this codebase yet.
 
 ```clojure
 (mouse-press! el :primary)
@@ -120,7 +121,7 @@ No bare text strings; use `{:text "Save"}` explicitly. Separate selector steps m
 (key-release! el :enter)
 ```
 
-Inputs are synthetic JavaFX events with user-like semantics, not real desktop input.
+Inputs are planned synthetic JavaFX events with user-like semantics, not real desktop input.
 
 - minimal v1 API is `mouse-press!`, `mouse-release!`, `key-press!`, `key-release!`
 - all input fns return a plain result map on success and throw exception on failure

@@ -124,11 +124,22 @@ TODO: synthetic mouse/key input helpers are not implemented in this codebase yet
 Inputs are planned synthetic JavaFX events with user-like semantics, not real desktop input.
 
 - minimal v1 API is `mouse-press!`, `mouse-release!`, `key-press!`, `key-release!`
-- all input fns return a plain result map on success and throw exception on failure
-- mouse targets the center of `el`
-- mouse/key dispatch is meant to be close to user interaction, not raw `fireEvent` on arbitrary targets
-- input must fail when `el` is detached, not shown in a scene/window, or otherwise cannot be interacted with as intended
-- mouse input also fails if interacting at `el`'s center does not make focus move to `el` or within `el`, e.g. when the point is covered by something else
-- key input is element-scoped for context and asserts that `el` is focused or contains the current focus owner before dispatch
+- all input fns return the actual element that received the interaction on success
+- input is simulated in the JavaFX scene graph, not through desktop automation and not by raw `fireEvent` on arbitrary targets
+- scene resolution for input context:
+  - `Window` -> `(.getScene window)`
+  - `Scene` -> the scene itself
+  - `Node` -> `(.getScene node)`
+  - anything else -> fail
+- input must fail when scene resolution fails or when `el` otherwise cannot be interacted with as intended
+- mouse input uses the center point of `el` as the intended interaction point
+- mouse input performs real picking/hit-testing at that point and fails unless the picked target is `el` or inside `el`, e.g. when the point is covered by something else
+- mouse events are dispatched according to the actual picked target / JavaFX dispatch chain, not directly to `el`
+- key input uses the resolved scene as the focus domain and dispatches to that scene's current focus owner
+- key input fails when the resolved scene has no focus owner
+- when `el` is a node, key input also fails unless the focus owner is `el` or inside `el`
+- when `el` is a scene or window, key input is allowed for whatever node is currently focused in that scene
 - `key-press!` fires `KEY_PRESSED` and then optionally `KEY_TYPED` if typeable, `key-release!` fires `KEY_RELEASED`;
 - if `mouse-press!` dispatches a press but later fails validation, it must dispatch a matching release before throwing
+- failures use ordinary Java exceptions when the message alone is enough
+- failures use `ex-info` only when attaching `{:el actual-el}` adds meaningful context, e.g. when interaction resolved to a different element

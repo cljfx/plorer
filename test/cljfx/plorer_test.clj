@@ -2,8 +2,11 @@
   (:require [cljfx.plorer :as plorer]
             [clojure.test :as t :refer [deftest is testing]])
   (:import [javafx.application Platform]
+           [javafx.event EventHandler]
            [javafx.scene Group Scene SubScene]
+           [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent]
            [javafx.scene.layout VBox]
+           [javafx.scene.shape Rectangle]
            [javafx.scene.text Text]
            [javafx.stage Stage Window]))
 
@@ -20,7 +23,7 @@
   (if (Platform/isFxApplicationThread)
     (f)
     (let [result (promise)]
-      (Platform/runLater (bound-fn [] (deliver result (try [::ok (f)] (catch Throwable t [::err t]))) (Thread/sleep 50)))
+      (Platform/runLater (bound-fn [] (deliver result (try [::ok (f)] (catch Throwable t [::err t]))) (Thread/sleep 150)))
       (let [[status value] @result]
         (case status ::ok value ::err (throw value))))))
 
@@ -311,6 +314,243 @@
                         (#'plorer/canonicalize-selector #{:a})))
   (is (thrown-with-msg? IllegalArgumentException #"Unsupported selector: \[:a\]"
                         (#'plorer/canonicalize-selector [:a]))))
+
+(deftest mouse-input-dispatches-to-the-picked-target
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-mouse-input []
+                  (let [back (doto (Rectangle. 100.0 100.0)
+                               (.setId "back"))
+                        front (doto (Rectangle. 100.0 100.0)
+                                (.setId "front"))
+                        root (group back front)]
+                    (.addEventHandler front MouseEvent/MOUSE_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getTarget event)]))))
+                    (.addEventHandler front MouseEvent/MOUSE_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getTarget event)]))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [front (plorer/one "#front")]
+        (is (= front (plorer/mouse-press! front :primary)))
+        (is (= front (plorer/mouse-release! front :primary)))
+        (is (= [[:pressed front]
+                [:released front]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest mouse-input-accepts-mousebutton-enum-values
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-mouse-button-enum-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target"))
+                        root (group target)]
+                    (.addEventHandler target MouseEvent/MOUSE_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getButton event)]))))
+                    (.addEventHandler target MouseEvent/MOUSE_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getButton event)]))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [target (plorer/one "#target")]
+        (is (= target (plorer/mouse-press! target MouseButton/PRIMARY)))
+        (is (= target (plorer/mouse-release! target MouseButton/PRIMARY)))
+        (is (= [[:pressed MouseButton/PRIMARY]
+                [:released MouseButton/PRIMARY]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest mouse-input-accepts-scene-and-window-by-dispatching-via-root
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-scene-and-window-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target"))
+                        root (group target)
+                        scene (Scene. root 100.0 100.0)]
+                    (.addEventHandler target MouseEvent/MOUSE_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getTarget event)]))))
+                    (.addEventHandler target MouseEvent/MOUSE_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getTarget event)]))))
+                    (doto (Stage.)
+                      (.setScene scene)
+                      (.show)))))]
+    (try
+      (let [scene (.getScene stage)
+            target (plorer/one "#target")]
+        (is (= target (plorer/mouse-press! scene :primary)))
+        (is (= target (plorer/mouse-release! stage :primary)))
+        (is (= [[:pressed target]
+                [:released target]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest mouse-input-fails-when-another-node-is-picked-and-balances-press-with-release
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-covered-mouse-input []
+                  (let [back (doto (Rectangle. 100.0 100.0)
+                               (.setId "back"))
+                        cover (doto (Rectangle. 100.0 100.0)
+                                (.setId "cover"))
+                        root (group back cover)]
+                    (.addEventHandler cover MouseEvent/MOUSE_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ _]
+                                          (swap! events conj :pressed))))
+                    (.addEventHandler cover MouseEvent/MOUSE_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ _]
+                                          (swap! events conj :released))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [back (plorer/one "#back")
+            cover (plorer/one "#cover")]
+        (try
+          (plorer/mouse-press! back :primary)
+          (is false "Expected mouse-press! to fail when another node covers the target")
+          (catch clojure.lang.ExceptionInfo ex
+            (is (= "Mouse interaction resolved to a different element" (ex-message ex)))
+            (is (= {:el cover} (ex-data ex)))))
+        (is (= [:pressed :released] @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-dispatches-pressed-typed-and-released-to-focused-node
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-key-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target KeyEvent/KEY_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getCode event)]))))
+                    (.addEventHandler target KeyEvent/KEY_TYPED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:typed (.getCharacter event)]))))
+                    (.addEventHandler target KeyEvent/KEY_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getCode event)]))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [target (plorer/one "#target")]
+        (fx-sync (fn await-focus []
+                   (is (= target (.getFocusOwner (.getScene target))))))
+        (is (= target (plorer/key-press! target :a)))
+        (is (= target (plorer/key-release! target :a)))
+        (is (= [[:pressed KeyCode/A]
+                [:typed "A"]
+                [:released KeyCode/A]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-fails-when-node-does-not-contain-focus-owner
+  (let [stage (fx-sync
+                (fn create-stage-for-key-focus-validation []
+                  (let [left (doto (Rectangle. 100.0 100.0)
+                               (.setId "left")
+                               (.setFocusTraversable true))
+                        right (doto (Rectangle. 100.0 100.0)
+                                (.setId "right")
+                                (.setFocusTraversable true))
+                        root (group left right)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 220.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.setTranslateX right 120.0)
+                    (.requestFocus right)
+                    stage)))]
+    (try
+      (let [left (plorer/one "#left")
+            right (plorer/one "#right")]
+        (fx-sync (fn await-focus []
+                   (is (= right (.getFocusOwner (.getScene right))))))
+        (is (thrown-with-msg? IllegalArgumentException #"Key input target does not contain the focused node"
+                              (plorer/key-press! left :enter))))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-accepts-scene-and-window-by-validating-against-root
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-scene-and-window-key-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target KeyEvent/KEY_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getCode event)]))))
+                    (.addEventHandler target KeyEvent/KEY_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getCode event)]))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [scene (.getScene stage)
+            target (plorer/one "#target")]
+        (fx-sync (fn await-focus []
+                   (is (= target (.getFocusOwner scene)))))
+        (is (= target (plorer/key-press! scene :enter)))
+        (is (= target (plorer/key-release! stage :enter)))
+        (is (= [[:pressed KeyCode/ENTER]
+                [:released KeyCode/ENTER]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-fails-when-there-is-no-focus-owner
+  (let [target (Rectangle. 100.0 100.0)
+        scene (Scene. (group target) 100.0 100.0)]
+    (is (nil? (fx-sync (fn focus-owner []
+                         (.getFocusOwner scene)))))
+    (is (thrown-with-msg? IllegalStateException #"Key input requires a focused node"
+                          (plorer/key-press! target :enter)))))
 
 (defn test-ns-hook []
   (start-fx-runtime!)

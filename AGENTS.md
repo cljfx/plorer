@@ -1,3 +1,7 @@
+# Rules
+
+Fix reflection warnings. Use variables and keywords with "?" suffix only to denote predicate functions, never boolean values.
+
 # Format code
 
 ```bash

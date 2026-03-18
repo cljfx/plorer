@@ -18,13 +18,17 @@
   (one \"#root\")
   ```"
   (:require [clojure.string :as str])
-  (:import [java.beans Introspector]
+  (:import [com.sun.javafx.scene SceneHelper]
+           [java.beans Introspector]
            [java.lang.reflect Method Modifier]
            [java.util ArrayDeque]
            [javafx.application Platform]
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
-           [javafx.scene Parent Scene SubScene]
+           [javafx.event Event EventHandler EventType]
+           [javafx.geometry Bounds Point2D]
+           [javafx.scene Node Parent Scene SubScene]
+           [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult]
            [javafx.stage Window]))
 
 (set! *warn-on-reflection* true)
@@ -333,5 +337,178 @@
     (if (= 1 (count results))
       (first results)
       (throw (IllegalStateException. (str "Expected exactly one match, got " (count results)))))))
+
+;; endregion
+
+;; region mouse input
+
+(defn- resolve-input-target [el]
+  (condp instance? el
+    Node (let [scene (.getScene ^Node el)]
+           (when (nil? scene)
+             (throw (IllegalStateException. "Input target requires a node with a scene")))
+           {:scene scene
+            :node el})
+    Scene (let [root (.getRoot ^Scene el)]
+            (when (nil? root)
+              (throw (IllegalStateException. "Input target requires a scene root")))
+            {:scene el
+             :node root})
+    Window (let [scene (.getScene ^Window el)]
+             (when (nil? scene)
+               (throw (IllegalStateException. "Input target requires a window with a scene")))
+             (recur scene))
+    (throw (IllegalArgumentException. "Input target must be a Window, Scene, or Node"))))
+
+(defn- enum-keyword->name [k]
+  (-> (name k)
+      (str/replace "-" "_")
+      str/upper-case))
+
+(defn- node-descendant? [ancestor node]
+  (loop [node node]
+    (cond
+      (nil? node) false
+      (identical? ancestor node) true
+      :else (recur (.getParent ^Node node)))))
+
+(defn- with-captured-target [^Scene scene ^EventType event-type f]
+  (let [captured-target (atom nil)
+        handler (reify EventHandler
+                  (handle [_ event]
+                    (when (nil? @captured-target)
+                      (reset! captured-target (.getTarget event)))))]
+    (.addEventFilter scene event-type handler)
+    (try
+      (f captured-target)
+      (finally
+        (.removeEventFilter scene event-type handler)))))
+
+;; At the call site in src/cljfx/plorer.clj:406, nil is valid for PickResult.’s first arg. The PickResult(EventTarget, double, double) constructor explicitly accepts a non-Node target and turns that into a null intersected node.
+;; More importantly, in this code path SceneHelper/processMouseEvent immediately does its own scene pick from sceneX/sceneY and rebuilds the MouseEvent with the real PickResult before dispatch. So the placeholder PickResult you construct there is effectively ignored for targeting.
+;; If you were firing a MouseEvent directly at a known node, passing that node would be more informative. For this SceneHelper/processMouseEvent path, a non-nil first arg is not required.
+
+(defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button]
+  (MouseEvent.
+    #_event-type event-type
+    #_x (.getX scene-point)
+    #_y (.getY scene-point)
+    #_screen-x (.getX screen-point)
+    #_screen-y (.getY screen-point)
+    #_button button
+    #_click-count 1
+    #_shift-down false
+    #_control-down false
+    #_alt-down false
+    #_meta-down false
+    #_primary-button-down (identical? MouseButton/PRIMARY button)
+    #_middle-button-down (identical? MouseButton/MIDDLE button)
+    #_secondary-button-down (identical? MouseButton/SECONDARY button)
+    #_synthesized false
+    #_popup-trigger false
+    #_still-since-press false
+    #_pick-result (PickResult. nil (.getX scene-point) (.getY scene-point))))
+
+(defn- dispatch-mouse! [el event-type button]
+  (let [{:keys [^Scene scene ^Node node]} (resolve-input-target el)
+        bounds (.getLayoutBounds node)
+        center-of-node (Point2D. (+ (.getMinX ^Bounds bounds) (/ (.getWidth ^Bounds bounds) 2.0))
+                                 (+ (.getMinY ^Bounds bounds) (/ (.getHeight ^Bounds bounds) 2.0)))
+        scene-point (or (.localToScene node center-of-node)
+                        (throw (IllegalStateException. "Mouse input requires a node with scene coordinates")))
+        screen-point (or (.localToScreen node center-of-node)
+                         (throw (IllegalStateException. "Mouse input requires a showing node")))
+        button (cond
+                 (instance? MouseButton button)
+                 button
+
+                 (keyword? button)
+                 (try
+                   (MouseButton/valueOf (enum-keyword->name button))
+                   (catch IllegalArgumentException _
+                     (throw (IllegalArgumentException. (str "Unsupported mouse button: " button)))))
+
+                 :else
+                 (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
+        event (mouse-event event-type scene-point screen-point button)]
+    (with-captured-target scene event-type
+      (fn capture-dispatched-target [captured-target]
+        (SceneHelper/processMouseEvent scene event)
+        (let [actual @captured-target]
+          (when-not (and (instance? Node actual) (node-descendant? node actual))
+            (when (= MouseEvent/MOUSE_PRESSED event-type)
+              (SceneHelper/processMouseEvent scene (mouse-event MouseEvent/MOUSE_RELEASED scene-point screen-point button)))
+            (throw (ex-info "Mouse interaction resolved to a different element" {:el actual})))
+          actual)))))
+
+(defn mouse-press!
+  "Dispatch a synthetic mouse press through the JavaFX scene graph."
+  [el button]
+  (on-ui-thread
+    (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button)))
+
+(defn mouse-release!
+  "Dispatch a synthetic mouse release through the JavaFX scene graph."
+  [el button]
+  (on-ui-thread
+    (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button)))
+
+;; endregion
+
+;; region key input
+
+(defn- key-code [key]
+  (try
+    (KeyCode/valueOf (enum-keyword->name key))
+    (catch IllegalArgumentException _
+      (throw (IllegalArgumentException. (str "Unsupported key: " key))))))
+
+(defn- key-typed-character [^KeyCode code]
+  (let [character (.getChar code)]
+    (when (and (= 1 (count character))
+               (<= (int \space) (int (first character))))
+      character)))
+
+(defn- key-event [event-type ^KeyCode code]
+  (KeyEvent. event-type
+             (if (= KeyEvent/KEY_TYPED event-type)
+               (key-typed-character code)
+               KeyEvent/CHAR_UNDEFINED)
+             (if (= KeyEvent/KEY_TYPED event-type)
+               ""
+               (.getName code))
+             (if (= KeyEvent/KEY_TYPED event-type)
+               KeyCode/UNDEFINED
+               code)
+             false false false false))
+
+(defn- focus-owner-for-key-input [el]
+  (let [{:keys [scene node]} (resolve-input-target el)]
+    (let [focus-owner (.getFocusOwner ^Scene scene)]
+      (when (nil? focus-owner)
+        (throw (IllegalStateException. "Key input requires a focused node")))
+      (when-not (node-descendant? node focus-owner)
+        (throw (IllegalArgumentException. "Key input target does not contain the focused node")))
+      [scene focus-owner])))
+
+(defn key-press!
+  "Dispatch a synthetic key press through the JavaFX scene graph."
+  [el key]
+  (on-ui-thread
+    (let [[scene focus-owner] (focus-owner-for-key-input el)
+          code (key-code key)]
+      (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_PRESSED code))
+      (when (key-typed-character code)
+        (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED code)))
+      focus-owner)))
+
+(defn key-release!
+  "Dispatch a synthetic key release through the JavaFX scene graph."
+  [el key]
+  (on-ui-thread
+    (let [[scene focus-owner] (focus-owner-for-key-input el)
+          code (key-code key)]
+      (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_RELEASED code))
+      focus-owner)))
 
 ;; endregion

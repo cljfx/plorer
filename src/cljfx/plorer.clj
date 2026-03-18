@@ -12,7 +12,7 @@
 
   ```clojure
   (props el :only [:id :text])
-  (tree)
+  (tree :depth 3)
   (tree el :props [:id])
   (all Text)
   (one \"#root\")
@@ -146,8 +146,7 @@
 
   ```clojure
   (tree el)
-  (tree el :depth 1)
-  (tree node :props [:id])
+  (tree el :props [:id])
   (tree :depth 3 :props [:id :title])
   ```"
   [& args]

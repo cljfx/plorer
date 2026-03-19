@@ -4,6 +4,7 @@
   (:import [javafx.application Platform]
            [javafx.event EventHandler]
            [javafx.scene Group Scene SubScene]
+           [javafx.scene.control TextField]
            [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent]
            [javafx.scene.layout VBox]
            [javafx.scene.shape Rectangle]
@@ -35,6 +36,11 @@
 
 (defn- tree-els [tree]
   (map :el (tree-seq (comp seq :children) :children tree)))
+
+(defn- platform-shortcut-key []
+  (if (.startsWith (.toLowerCase (System/getProperty "os.name")) "mac")
+    :meta
+    :control))
 
 (deftest props-reads-supported-properties
   (let [el (doto (Text. "Hello")
@@ -622,6 +628,49 @@
                 [:typed "A"]
                 [:released KeyCode/A]]
                @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-can-copy-selected-text-between-text-fields
+  (let [shortcut-key (platform-shortcut-key)
+        stage (fx-sync
+                (fn create-stage-for-text-field-copy-paste []
+                  (let [source (doto (TextField. "Hello")
+                                 (.setId "source"))
+                        target (doto (TextField.)
+                                 (.setId "target"))
+                        root (doto (VBox. 8.0)
+                               (.setId "root"))
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 200.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addAll (.getChildren root) [source target])
+                    (.requestFocus source)
+                    stage)))]
+    (try
+      (let [source (plorer/one "#source")
+            target (plorer/one "#target")]
+        (fx-sync (fn await-initial-focus []
+                   (is (= source (.getFocusOwner (.getScene source))))))
+        (is (= source (plorer/key-press! source shortcut-key)))
+        (is (= source (plorer/key-press! source :a)))
+        (is (= source (plorer/key-release! source :a)))
+        (is (= source (plorer/key-press! source :c)))
+        (is (= source (plorer/key-release! source :c)))
+        (is (= source (plorer/key-release! source shortcut-key)))
+        (is (= source (plorer/key-press! source :tab)))
+        (is (= target (plorer/key-release! target :tab)))
+        (fx-sync (fn await-tab-focus []
+                   (is (= target (.getFocusOwner (.getScene target))))))
+        (is (= target (plorer/key-press! target shortcut-key)))
+        (is (= target (plorer/key-press! target :v)))
+        (is (= target (plorer/key-release! target :v)))
+        (is (= target (plorer/key-release! target shortcut-key)))
+        (fx-sync (fn assert-text-values []
+                   (is (= "Hello" (.getText ^TextField source)))
+                   (is (= "Hello" (.getText ^TextField target))))))
       (finally
         (fx-sync (fn close-stage []
                    (.close stage)))))))

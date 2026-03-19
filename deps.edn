@@ -1,6 +1,15 @@
-{:deps {org.openjfx/javafx-graphics {:mvn/version "25.0.2"}}
+{:deps {org.clojure/clojure {:mvn/version "1.12.4"}
+        org.openjfx/javafx-graphics {:mvn/version "25.0.2"}
+        org.openjfx/javafx-controls {:mvn/version "25.0.2"}}
  :aliases
- {:fmt
+ {:build
+  {:deps {io.github.clojure/tools.build
+          {:git/tag "v0.10.13"
+           :git/sha "ae52edfedef4ca72e699e9c86abfe0940e97dc26"}
+          clj-commons/pomegranate
+          {:mvn/version "1.2.25"}}
+   :ns-default build}
+  :fmt
   {:extra-deps {dev.weavejester/cljfmt {:mvn/version "0.16.2"}}
    :main-opts ["-m" "cljfmt.main"]}
   :test

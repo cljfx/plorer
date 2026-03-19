@@ -210,6 +210,8 @@
         (is (= [stage] (plorer/all > Stage)))
         (is (= [stage] (plorer/all Window)))
         (is (= [root] (plorer/all "#assets")))
+        (is (= [root] (plorer/all stage "#assets")))
+        (is (= [direct-text nested-text name-text] (plorer/all root Text)))
         (is (= [root] (plorer/all ".container")))
         (is (= [root] (plorer/all "#assets.container")))
         (is (= [direct-text nested-text name-text] (plorer/all Text)))
@@ -263,6 +265,8 @@
                       (.show)))))]
     (try
       (is (= stage (plorer/one > Stage)))
+      (is (= (first (.getChildren ^VBox (.getRoot (.getScene stage))))
+             (plorer/one stage {:fx.plorer/class Text :text "One"})))
       (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"
                             (plorer/one Text)))
       (is (thrown-with-msg? IllegalStateException #"Expected exactly one match"

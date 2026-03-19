@@ -7,13 +7,18 @@ It is built for inspection-heavy workflows: enumerate supported properties, insp
 ## Installation
 
 ```clojure
-;; published version is derived from the git commit count at release time
 {:deps {cljfx/plorer {:mvn/version "1.<commit-count>"}}}
 ```
 
 ## Functionality
 
-Throughout this API, `el` means a JavaFX scene-graph element: a `Node`, `Scene`, or `Window`.
+Require `cljfx.plorer` in your REPL before using the functions in this section:
+
+```clojure
+(require 'cljfx.plorer)
+```
+
+In this library, `el` means a JavaFX scene-graph element: a `Node`, `Scene`, `Window`, or synthetic `ROOT`.
 
 ### Props
 
@@ -22,7 +27,7 @@ Throughout this API, `el` means a JavaFX scene-graph element: a `Node`, `Scene`,
 Supported keys come from JavaFX `fooProperty()` accessors and observable-list `getFoo()` getters. Unsupported keys are omitted, while supported keys with `nil` values are still included.
 
 ```clojure
-(props el)                           ;; read all supported props
+(props el)                            ;; read all supported props
 (props el :only [:id :text :visible]) ;; limit reads to selected props
 ;;=> {:id "name", :text "Name", :visible true, ...}
 ```
@@ -31,7 +36,7 @@ Supported keys come from JavaFX `fooProperty()` accessors and observable-list `g
 
 `tree` builds a nested representation of an element and its children.
 
-`cljfx.plorer` models the live scene graph as a tree rooted at a synthetic `ROOT` element: `ROOT` -> all open Windows -> each `Scene` -> scene roots -> descendant nodes. If `el` is omitted, `tree` starts from that `ROOT`. Child lookup follows the live JavaFX structure: `Window -> Scene`, `Scene -> root`, `Parent -> children`, and `SubScene -> root`. Every returned item contains `:el`, `:props` are included only when requested, and `:depth 0` returns only the current node.
+If `el` is omitted, `tree` starts from the synthetic `ROOT`. Every returned item contains `:el`, `:props` are included only when requested, and `:depth 0` returns only the current node.
 
 ```clojure
 (tree el)                    ;; full subtree for el
@@ -101,7 +106,7 @@ Keys may be keywords such as `:enter`, `:tab`, `:a`, `:shift`, `:control`, `:alt
 
 `mouse-press!` and `mouse-release!` send synthetic JavaFX mouse events.
 
-Buttons may be `:primary`, `:middle`, `:secondary`, or a `MouseButton` value. The event is aimed at the visual center of `el`, but actual dispatch goes through JavaFX picking, and the returned value is the picked node. Calls fail if the target has no scene or showing coordinates, and they throw `ex-info` if picking resolves to a different element; failed presses send a balancing release first.
+Buttons may be `:primary`, `:middle`, `:secondary`, or a `MouseButton` value. The event is aimed at the visual center of `el`, but actual dispatch goes through JavaFX picking, and the returned value is the picked node. Calls fail if the target has no scene or showing coordinates, or if picking resolves to a different element; failed presses send a balancing release first.
 
 ```clojure
 (mouse-press! el :primary)

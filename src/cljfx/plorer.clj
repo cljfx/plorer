@@ -1,7 +1,7 @@
 (ns cljfx.plorer
   "Inspect and query JavaFX scene graphs from Clojure.
    
-  `el` is a scene graph element, e.g., Node, Window, or Scene.
+  `el` is a scene graph element, e.g., Node, Window, Scene, or synthetic ROOT.
 
   Public entry points:
   - `props` for reading supported properties from an el
@@ -138,6 +138,12 @@
     (toString [_] "cljfx.plorer/ROOT")
     ChildLookup
     (-children [_] (vec (Window/getWindows)))))
+
+(defn- el? [x]
+  (or (identical? ROOT x)
+      (instance? Window x)
+      (instance? Scene x)
+      (instance? Node x)))
 
 (defn ^{:arglists '([el? & {:keys [depth props]}])} tree
   "Return a tree for `el`, or from the synthetic root when `el` is omitted.
@@ -280,24 +286,27 @@
                (conj steps {:direct direct :match (matcher selector)})))
       steps)))
 
-(defn- execute-query [selectors]
-  (reduce
-    (fn execute-step [els {:keys [direct match]}]
-      (into []
-            (comp
-              (mapcat (fn step-children-or-descendants [el]
-                        (if direct (-children el) (query-descendants el))))
-              (filter match)
-              (distinct))
-            els))
-    [ROOT]
-    (normalize-query-steps selectors)))
+(defn- execute-query [args]
+  (let [candidate (first args)
+        start-el (if (el? candidate) candidate ROOT)
+        selectors (if (el? candidate) (next args) args)]
+    (reduce
+      (fn execute-step [els {:keys [direct match]}]
+        (into []
+              (comp
+                (mapcat (fn step-children-or-descendants [el]
+                          (if direct (-children el) (query-descendants el))))
+                (filter match)
+                (distinct))
+              els))
+      [start-el]
+      (normalize-query-steps selectors))))
 
-(defn all
+(defn ^{:arglists '([el? & selectors])} all
   "Return all matching els for `selectors`.
 
-  Queries start from all open windows and run left to right. `>` makes the
-  next step direct-child only.
+  Queries start from `el` when provided, otherwise from `ROOT`, and run left
+  to right. `>` makes the next step direct-child only.
 
   Selector forms:
   - `Class` matches by `instance?`
@@ -315,17 +324,18 @@
   Example:
 
   ```clojure
+  (all root Text)
   (all > Window)
   (all VBox > Text)
   (all {:id some?})
   (all \"#id.class.other-class\")
   (all {:fx.plorer/class Text :id \"title\" :fx.plorer/style-classes #{\"primary\"}})
   ```"
-  [& selectors]
+  [& args]
   (on-ui-thread
-    (execute-query selectors)))
+    (execute-query args)))
 
-(defn one
+(defn ^{:arglists '([el? & selectors])} one
   "Return the only matching el for `selectors`.
 
   Same selector forms as `all`. Throws `IllegalStateException` on 0 or many
@@ -334,10 +344,11 @@
   Example:
 
   ```clojure
+  (one root \"#title\")
   (one \"#root\")
   ```"
-  [& selectors]
-  (let [results (apply all selectors)]
+  [& args]
+  (let [results (apply all args)]
     (if (= 1 (count results))
       (first results)
       (throw (IllegalStateException. (str "Expected exactly one match, got " (count results)))))))

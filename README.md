@@ -6,8 +6,13 @@ It is built for inspection-heavy workflows: enumerate supported properties, insp
 
 ## Installation
 
+Using `deps.edn`:
 ```clojure
-{:deps {cljfx/plorer {:mvn/version "1.<commit-count>"}}}
+cljfx/plorer {:mvn/version "1.<commit-count>"}
+```
+Using `lein`:
+```clojure
+[cljfx/plorer "1.<commit-count>"]
 ```
 
 ## Getting Started

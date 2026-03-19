@@ -30,6 +30,18 @@ jobs:
         with:
           cli: latest
 
+      - id: cache-clojure
+        name: Cache Clojure deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .cpcache
+          key: ${{ runner.os }}-clojure-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-clojure-
+
       - id: format-check
         name: Check formatting
         run: clojure -M:fmt check src test

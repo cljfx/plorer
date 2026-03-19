@@ -1,5 +1,9 @@
 # cljfx/plorer
 
+[![CI](https://github.com/cljfx/plorer/actions/workflows/ci.yml/badge.svg)](https://github.com/cljfx/plorer/actions/workflows/ci.yml)
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.cljfx/plorer.svg)](https://clojars.org/io.github.cljfx/plorer)
+[![License](https://img.shields.io/github/license/cljfx/plorer)](LICENSE)
+
 A small library for exploring and driving the live JavaFX scene graph from a Clojure REPL.
 
 It is built for inspection-heavy workflows: enumerate supported properties, inspect tree structure, query nodes/windows/scenes, and send synthetic key and mouse events.
@@ -8,11 +12,11 @@ It is built for inspection-heavy workflows: enumerate supported properties, insp
 
 Using `deps.edn`:
 ```clojure
-io.github.cljfx/plorer {:mvn/version "1.<commit-count>"}
+io.github.cljfx/plorer {:mvn/version "1.25"}
 ```
 Using `lein`:
 ```clojure
-[io.github.cljfx/plorer "1.<commit-count>"]
+[io.github.cljfx/plorer "1.25"]
 ```
 
 ## Getting Started

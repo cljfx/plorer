@@ -16,6 +16,10 @@
   (tree el :props [:id])
   (all Text)
   (one \"#root\")
+  (key-press! el :alt)
+  (mouse-press! el :primary)
+  (mouse-release! el :primary)
+  (key-release! el :alt)
   ```"
   (:require [clojure.string :as str])
   (:import [com.sun.javafx.scene SceneHelper]
@@ -429,12 +433,27 @@
       focus-owner)))
 
 (defn key-press!
-  "Dispatch a synthetic key press through the JavaFX scene graph."
+  "Dispatch a synthetic key press for `key` on `el`.
+
+  `key` may be a `KeyCode` or a keyword such as `:enter`, `:tab`, `:escape`,
+  `:a`, `:shift`, `:control`, `:alt`, or `:meta`.
+
+  Returns the focused node that received the event. Printable keys also emit a
+  synthetic `KEY_TYPED` event. Pair each call with `key-release!`, especially
+  for modifiers, to avoid leaking held-key state. Throws when there is no focus
+  owner or when the focused node is outside `el`."
   [el key]
   (dispatch-key! el KeyEvent/KEY_PRESSED key))
 
 (defn key-release!
-  "Dispatch a synthetic key release through the JavaFX scene graph."
+  "Dispatch a synthetic key release for `key` on `el`.
+
+  Accepts the same key forms as `key-press!` and returns the focused node that
+  received the event.
+
+  Modifier state is tracked across `key-press!` and `key-release!`, so release
+  keys you press, e.g. `:shift`, `:control`, `:alt`, or `:meta`. Throws when
+  there is no focus owner or when the focused node is outside `el`."
   [el key]
   (dispatch-key! el KeyEvent/KEY_RELEASED key))
 
@@ -496,12 +515,26 @@
           (.removeEventFilter scene event-type handler))))))
 
 (defn mouse-press!
-  "Dispatch a synthetic mouse press through the JavaFX scene graph."
+  "Dispatch a synthetic mouse press for `button` on `el`.
+
+  `button` may be a `MouseButton` or one of `:primary`, `:middle`, or
+  `:secondary`.
+
+  Clicks the visual center of `el` and returns the picked node. Throws if `el`
+  is not showing, has no scene coordinates, or if a different node is picked.
+  Pair each call with `mouse-release!`; a failed press sends a balancing
+  release first."
   [el button]
   (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button))
 
 (defn mouse-release!
-  "Dispatch a synthetic mouse release through the JavaFX scene graph."
+  "Dispatch a synthetic mouse release for `button` on `el`.
+
+  Accepts the same button forms as `mouse-press!` and returns the picked node.
+  Supported button keywords are `:primary`, `:middle`, and `:secondary`.
+
+  The event uses the visual center of `el`. Throws if `el` is not showing, has
+  no scene coordinates, or if a different node is picked."
   [el button]
   (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button))
 

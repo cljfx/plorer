@@ -42,6 +42,14 @@
     :meta
     :control))
 
+(deftest mouse-input-root-requires-a-single-open-window
+  (is (thrown-with-msg? IllegalStateException #"ROOT input target requires exactly one open window, got 0"
+                        (plorer/mouse-press! :primary))))
+
+(deftest key-input-root-requires-a-single-open-window
+  (is (thrown-with-msg? IllegalStateException #"ROOT input target requires exactly one open window, got 0"
+                        (plorer/key-press! :enter))))
+
 (deftest props-reads-supported-properties
   (let [el (doto (Text. "Hello")
              (.setId "greeting"))]
@@ -416,6 +424,35 @@
         (fx-sync (fn close-stage []
                    (.close stage)))))))
 
+(deftest mouse-input-defaults-to-root
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-root-mouse-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target"))
+                        root (group target)]
+                    (.addEventHandler target MouseEvent/MOUSE_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getTarget event)]))))
+                    (.addEventHandler target MouseEvent/MOUSE_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getTarget event)]))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [target (plorer/one "#target")]
+        (is (= target (plorer/mouse-press! :primary)))
+        (is (= target (plorer/mouse-release! :primary)))
+        (is (= [[:pressed target]
+                [:released target]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
 (deftest mouse-input-fails-when-another-node-is-picked-and-balances-press-with-release
   (let [events (atom [])
         stage (fx-sync
@@ -736,6 +773,41 @@
                    (is (= target (.getFocusOwner scene)))))
         (is (= target (plorer/key-press! scene :enter)))
         (is (= target (plorer/key-release! stage :enter)))
+        (is (= [[:pressed KeyCode/ENTER]
+                [:released KeyCode/ENTER]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-defaults-to-root
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-root-key-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target KeyEvent/KEY_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getCode event)]))))
+                    (.addEventHandler target KeyEvent/KEY_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getCode event)]))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [target (plorer/one "#target")]
+        (fx-sync (fn await-focus []
+                   (is (= target (.getFocusOwner (.getScene target))))))
+        (is (= target (plorer/key-press! :enter)))
+        (is (= target (plorer/key-release! :enter)))
         (is (= [[:pressed KeyCode/ENTER]
                 [:released KeyCode/ENTER]]
                @events)))

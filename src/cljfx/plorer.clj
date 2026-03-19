@@ -288,8 +288,9 @@
 
 (defn- execute-query [args]
   (let [candidate (first args)
-        start-el (if (el? candidate) candidate ROOT)
-        selectors (if (el? candidate) (next args) args)]
+        arg-is-el (el? candidate)
+        el (if arg-is-el candidate ROOT)
+        selectors (if arg-is-el (next args) args)]
     (reduce
       (fn execute-step [els {:keys [direct match]}]
         (into []
@@ -299,7 +300,7 @@
                 (filter match)
                 (distinct))
               els))
-      [start-el]
+      [el]
       (normalize-query-steps selectors))))
 
 (defn ^{:arglists '([el? & selectors])} all
@@ -332,8 +333,7 @@
   (all {:fx.plorer/class Text :id \"title\" :fx.plorer/style-classes #{\"primary\"}})
   ```"
   [& args]
-  (on-ui-thread
-    (execute-query args)))
+  (on-ui-thread (execute-query args)))
 
 (defn ^{:arglists '([el? & selectors])} one
   "Return the only matching el for `selectors`.
@@ -358,22 +358,26 @@
 ;; region key input
 
 (defn- resolve-input-target [el]
-  (condp instance? el
-    Node (let [scene (.getScene ^Node el)]
-           (when (nil? scene)
-             (throw (IllegalStateException. "Input target requires a node with a scene")))
-           {:scene scene
-            :node el})
-    Scene (let [root (.getRoot ^Scene el)]
-            (when (nil? root)
-              (throw (IllegalStateException. "Input target requires a scene root")))
-            {:scene el
-             :node root})
-    Window (let [scene (.getScene ^Window el)]
-             (when (nil? scene)
-               (throw (IllegalStateException. "Input target requires a window with a scene")))
-             (recur scene))
-    (throw (IllegalArgumentException. "Input target must be a Window, Scene, or Node"))))
+  (cond
+    (identical? ROOT el) (let [windows (vec (Window/getWindows))]
+                           (when-not (= 1 (count windows))
+                             (throw (IllegalStateException. (str "ROOT input target requires exactly one open window, got " (count windows)))))
+                           (recur (first windows)))
+    (instance? Node el) (let [scene (.getScene ^Node el)]
+                          (when (nil? scene)
+                            (throw (IllegalStateException. "Input target requires a node with a scene")))
+                          {:scene scene
+                           :node el})
+    (instance? Scene el) (let [root (.getRoot ^Scene el)]
+                           (when (nil? root)
+                             (throw (IllegalStateException. "Input target requires a scene root")))
+                           {:scene el
+                            :node root})
+    (instance? Window el) (let [scene (.getScene ^Window el)]
+                            (when (nil? scene)
+                              (throw (IllegalStateException. "Input target requires a window with a scene")))
+                            (recur scene))
+    :else (throw (IllegalArgumentException. "Input target must be ROOT, a Window, a Scene, or a Node"))))
 
 (defn- enum-keyword->name [k]
   (-> (name k) (str/replace "-" "_") str/upper-case))
@@ -453,8 +457,10 @@
   synthetic `KEY_TYPED` event. Pair each call with `key-release!`, especially
   for modifiers, to avoid leaking held-key state. Throws when there is no focus
   owner or when the focused node is outside `el`."
-  [el key]
-  (dispatch-key! el KeyEvent/KEY_PRESSED key))
+  ([key]
+   (dispatch-key! ROOT KeyEvent/KEY_PRESSED key))
+  ([el key]
+   (dispatch-key! el KeyEvent/KEY_PRESSED key)))
 
 (defn key-release!
   "Dispatch a synthetic key release for `key` on `el`.
@@ -465,8 +471,10 @@
   Modifier state is tracked across `key-press!` and `key-release!`, so release
   keys you press, e.g. `:shift`, `:control`, `:alt`, or `:meta`. Throws when
   there is no focus owner or when the focused node is outside `el`."
-  [el key]
-  (dispatch-key! el KeyEvent/KEY_RELEASED key))
+  ([key]
+   (dispatch-key! ROOT KeyEvent/KEY_RELEASED key))
+  ([el key]
+   (dispatch-key! el KeyEvent/KEY_RELEASED key)))
 
 ;; endregion
 
@@ -535,8 +543,10 @@
   is not showing, has no scene coordinates, or if a different node is picked.
   Pair each call with `mouse-release!`; a failed press sends a balancing
   release first."
-  [el button]
-  (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button))
+  ([button]
+   (dispatch-mouse! ROOT MouseEvent/MOUSE_PRESSED button))
+  ([el button]
+   (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button)))
 
 (defn mouse-release!
   "Dispatch a synthetic mouse release for `button` on `el`.
@@ -546,7 +556,9 @@
 
   The event uses the visual center of `el`. Throws if `el` is not showing, has
   no scene coordinates, or if a different node is picked."
-  [el button]
-  (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button))
+  ([button]
+   (dispatch-mouse! ROOT MouseEvent/MOUSE_RELEASED button))
+  ([el button]
+   (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button)))
 
 ;; endregion

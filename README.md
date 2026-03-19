@@ -8,6 +8,8 @@ A small library for exploring and driving the live JavaFX scene graph from a Clo
 
 It is built for programmatic inspection and interaction: enumerate supported properties, inspect tree structure, query nodes/windows/scenes, and send synthetic key and mouse events.
 
+Perfect if your coding agent has access to your REPL.
+
 ## Installation
 
 Using `deps.edn`:

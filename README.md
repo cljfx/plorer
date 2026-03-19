@@ -6,7 +6,7 @@
 
 A small library for exploring and driving the live JavaFX scene graph from a Clojure REPL.
 
-It is built for inspection-heavy workflows: enumerate supported properties, inspect tree structure, query nodes/windows/scenes, and send synthetic key and mouse events.
+It is built for programmatic inspection and interaction: enumerate supported properties, inspect tree structure, query nodes/windows/scenes, and send synthetic key and mouse events.
 
 ## Installation
 

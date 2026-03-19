@@ -544,6 +544,41 @@
         (fx-sync (fn close-stage []
                    (.close stage)))))))
 
+(deftest key-input-accepts-keycode-enum-values
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-key-code-enum-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target KeyEvent/KEY_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed (.getCode event)]))))
+                    (.addEventHandler target KeyEvent/KEY_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released (.getCode event)]))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [target (plorer/one "#target")]
+        (fx-sync (fn await-focus []
+                   (is (= target (.getFocusOwner (.getScene target))))))
+        (is (= target (plorer/key-press! target KeyCode/ENTER)))
+        (is (= target (plorer/key-release! target KeyCode/ENTER)))
+        (is (= [[:pressed KeyCode/ENTER]
+                [:released KeyCode/ENTER]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
 (deftest key-input-fails-when-there-is-no-focus-owner
   (let [target (Rectangle. 100.0 100.0)
         scene (Scene. (group target) 100.0 100.0)]

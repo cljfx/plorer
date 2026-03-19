@@ -340,7 +340,7 @@
 
 ;; endregion
 
-;; region mouse input
+;; region key input
 
 (defn- resolve-input-target [el]
   (condp instance? el
@@ -361,9 +361,7 @@
     (throw (IllegalArgumentException. "Input target must be a Window, Scene, or Node"))))
 
 (defn- enum-keyword->name [k]
-  (-> (name k)
-      (str/replace "-" "_")
-      str/upper-case))
+  (-> (name k) (str/replace "-" "_") str/upper-case))
 
 (defn- node-descendant? [ancestor node]
   (loop [node node]
@@ -372,21 +370,50 @@
       (identical? ancestor node) true
       :else (recur (.getParent ^Node node)))))
 
-(defn- with-captured-target [^Scene scene ^EventType event-type f]
-  (let [captured-target (atom nil)
-        handler (reify EventHandler
-                  (handle [_ event]
-                    (when (nil? @captured-target)
-                      (reset! captured-target (.getTarget event)))))]
-    (.addEventFilter scene event-type handler)
-    (try
-      (f captured-target)
-      (finally
-        (.removeEventFilter scene event-type handler)))))
+(defn- key-event [event-type typed-character ^KeyCode code]
+  (KeyEvent.
+    #_event-type event-type
+    #_character (if (= KeyEvent/KEY_TYPED event-type) typed-character KeyEvent/CHAR_UNDEFINED)
+    #_text (if (= KeyEvent/KEY_TYPED event-type) "" (.getName code))
+    #_code (if (= KeyEvent/KEY_TYPED event-type) KeyCode/UNDEFINED code)
+    #_shift-down false
+    #_control-down false
+    #_alt-down false
+    #_meta-down false))
 
-;; At the call site in src/cljfx/plorer.clj:406, nil is valid for PickResult.’s first arg. The PickResult(EventTarget, double, double) constructor explicitly accepts a non-Node target and turns that into a null intersected node.
-;; More importantly, in this code path SceneHelper/processMouseEvent immediately does its own scene pick from sceneX/sceneY and rebuilds the MouseEvent with the real PickResult before dispatch. So the placeholder PickResult you construct there is effectively ignored for targeting.
-;; If you were firing a MouseEvent directly at a known node, passing that node would be more informative. For this SceneHelper/processMouseEvent path, a non-nil first arg is not required.
+(defn- dispatch-key! [el event-type key]
+  (on-ui-thread
+    (let [{:keys [scene node]} (resolve-input-target el)
+          focus-owner (.getFocusOwner ^Scene scene)
+          code (cond
+                 (instance? KeyCode key) key
+                 (keyword? key) (KeyCode/valueOf (enum-keyword->name key))
+                 :else (throw (IllegalArgumentException. (str "Unsupported key: " key))))
+          character (.getChar ^KeyCode code)
+          typed-character (when (and (= 1 (count character)) (<= (int \space) (int (first character))))
+                            character)]
+      (when (nil? focus-owner)
+        (throw (IllegalStateException. "Key input requires a focused node")))
+      (when-not (node-descendant? node focus-owner)
+        (throw (IllegalArgumentException. "Key input target does not contain the focused node")))
+      (SceneHelper/processKeyEvent scene (key-event event-type typed-character code))
+      (when (and (= KeyEvent/KEY_PRESSED event-type) typed-character)
+        (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED typed-character code)))
+      focus-owner)))
+
+(defn key-press!
+  "Dispatch a synthetic key press through the JavaFX scene graph."
+  [el key]
+  (dispatch-key! el KeyEvent/KEY_PRESSED key))
+
+(defn key-release!
+  "Dispatch a synthetic key release through the JavaFX scene graph."
+  [el key]
+  (dispatch-key! el KeyEvent/KEY_RELEASED key))
+
+;; endregion
+
+;; region mouse input
 
 (defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button]
   (MouseEvent.
@@ -410,105 +437,44 @@
     #_pick-result (PickResult. nil (.getX scene-point) (.getY scene-point))))
 
 (defn- dispatch-mouse! [el event-type button]
-  (let [{:keys [^Scene scene ^Node node]} (resolve-input-target el)
-        bounds (.getLayoutBounds node)
-        center-of-node (Point2D. (+ (.getMinX ^Bounds bounds) (/ (.getWidth ^Bounds bounds) 2.0))
-                                 (+ (.getMinY ^Bounds bounds) (/ (.getHeight ^Bounds bounds) 2.0)))
-        scene-point (or (.localToScene node center-of-node)
-                        (throw (IllegalStateException. "Mouse input requires a node with scene coordinates")))
-        screen-point (or (.localToScreen node center-of-node)
-                         (throw (IllegalStateException. "Mouse input requires a showing node")))
-        button (cond
-                 (instance? MouseButton button)
-                 button
-
-                 (keyword? button)
-                 (try
-                   (MouseButton/valueOf (enum-keyword->name button))
-                   (catch IllegalArgumentException _
-                     (throw (IllegalArgumentException. (str "Unsupported mouse button: " button)))))
-
-                 :else
-                 (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
-        event (mouse-event event-type scene-point screen-point button)]
-    (with-captured-target scene event-type
-      (fn capture-dispatched-target [captured-target]
+  (on-ui-thread
+    (let [{:keys [^Scene scene ^Node node]} (resolve-input-target el)
+          bounds (.getLayoutBounds node)
+          center-of-node (Point2D. (+ (.getMinX ^Bounds bounds) (/ (.getWidth ^Bounds bounds) 2.0))
+                                   (+ (.getMinY ^Bounds bounds) (/ (.getHeight ^Bounds bounds) 2.0)))
+          scene-point (or (.localToScene node center-of-node)
+                          (throw (IllegalStateException. "Mouse input requires a node with scene coordinates")))
+          screen-point (or (.localToScreen node center-of-node)
+                           (throw (IllegalStateException. "Mouse input requires a showing node")))
+          button (cond
+                   (instance? MouseButton button) button
+                   (keyword? button) (MouseButton/valueOf (enum-keyword->name button))
+                   :else (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
+          event (mouse-event event-type scene-point screen-point button)
+          captured-target (atom nil)
+          handler (reify EventHandler
+                    (handle [_ event]
+                      (swap! captured-target #(or % (.getTarget event)))))]
+      (.addEventFilter scene event-type handler)
+      (try
         (SceneHelper/processMouseEvent scene event)
         (let [actual @captured-target]
           (when-not (and (instance? Node actual) (node-descendant? node actual))
             (when (= MouseEvent/MOUSE_PRESSED event-type)
               (SceneHelper/processMouseEvent scene (mouse-event MouseEvent/MOUSE_RELEASED scene-point screen-point button)))
             (throw (ex-info "Mouse interaction resolved to a different element" {:el actual})))
-          actual)))))
+          actual)
+        (finally
+          (.removeEventFilter scene event-type handler))))))
 
 (defn mouse-press!
   "Dispatch a synthetic mouse press through the JavaFX scene graph."
   [el button]
-  (on-ui-thread
-    (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button)))
+  (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button))
 
 (defn mouse-release!
   "Dispatch a synthetic mouse release through the JavaFX scene graph."
   [el button]
-  (on-ui-thread
-    (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button)))
-
-;; endregion
-
-;; region key input
-
-(defn- key-code [key]
-  (try
-    (KeyCode/valueOf (enum-keyword->name key))
-    (catch IllegalArgumentException _
-      (throw (IllegalArgumentException. (str "Unsupported key: " key))))))
-
-(defn- key-typed-character [^KeyCode code]
-  (let [character (.getChar code)]
-    (when (and (= 1 (count character))
-               (<= (int \space) (int (first character))))
-      character)))
-
-(defn- key-event [event-type ^KeyCode code]
-  (KeyEvent. event-type
-             (if (= KeyEvent/KEY_TYPED event-type)
-               (key-typed-character code)
-               KeyEvent/CHAR_UNDEFINED)
-             (if (= KeyEvent/KEY_TYPED event-type)
-               ""
-               (.getName code))
-             (if (= KeyEvent/KEY_TYPED event-type)
-               KeyCode/UNDEFINED
-               code)
-             false false false false))
-
-(defn- focus-owner-for-key-input [el]
-  (let [{:keys [scene node]} (resolve-input-target el)]
-    (let [focus-owner (.getFocusOwner ^Scene scene)]
-      (when (nil? focus-owner)
-        (throw (IllegalStateException. "Key input requires a focused node")))
-      (when-not (node-descendant? node focus-owner)
-        (throw (IllegalArgumentException. "Key input target does not contain the focused node")))
-      [scene focus-owner])))
-
-(defn key-press!
-  "Dispatch a synthetic key press through the JavaFX scene graph."
-  [el key]
-  (on-ui-thread
-    (let [[scene focus-owner] (focus-owner-for-key-input el)
-          code (key-code key)]
-      (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_PRESSED code))
-      (when (key-typed-character code)
-        (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED code)))
-      focus-owner)))
-
-(defn key-release!
-  "Dispatch a synthetic key release through the JavaFX scene graph."
-  [el key]
-  (on-ui-thread
-    (let [[scene focus-owner] (focus-owner-for-key-input el)
-          code (key-code key)]
-      (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_RELEASED code))
-      focus-owner)))
+  (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button))
 
 ;; endregion

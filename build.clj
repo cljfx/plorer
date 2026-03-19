@@ -7,7 +7,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def lib 'cljfx/plorer)
+(def lib 'io.github.cljfx/plorer)
 (def class-dir "target/classes")
 
 (defn- sh!

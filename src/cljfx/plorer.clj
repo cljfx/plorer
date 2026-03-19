@@ -21,11 +21,11 @@
   (:import [com.sun.javafx.scene SceneHelper]
            [java.beans Introspector]
            [java.lang.reflect Method Modifier]
-           [java.util ArrayDeque]
+           [java.util ArrayDeque WeakHashMap]
            [javafx.application Platform]
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
-           [javafx.event Event EventHandler EventType]
+           [javafx.event EventHandler]
            [javafx.geometry Bounds Point2D]
            [javafx.scene Node Parent Scene SubScene]
            [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult]
@@ -370,35 +370,62 @@
       (identical? ancestor node) true
       :else (recur (.getParent ^Node node)))))
 
-(defn- key-event [event-type typed-character ^KeyCode code]
+(def ^:private modifier-key-codes #{KeyCode/ALT KeyCode/CONTROL KeyCode/META KeyCode/SHIFT})
+
+(def ^:private ^WeakHashMap scene->held-modifier-codes (WeakHashMap.))
+
+(defn- normalize-key-code [key]
+  (cond
+    (instance? KeyCode key) key
+    (keyword? key) (KeyCode/valueOf (enum-keyword->name key))
+    :else (throw (IllegalArgumentException. (str "Unsupported key: " key)))))
+
+(defn- held-modifier-codes [^Scene scene]
+  (or (.get scene->held-modifier-codes scene) #{}))
+
+(defn- update-held-modifier-codes!
+  [^Scene scene f & args]
+  (let [held-modifier-codes (apply f (held-modifier-codes scene) args)]
+    (.put scene->held-modifier-codes scene held-modifier-codes)
+    held-modifier-codes))
+
+(defn- key-event [event-type typed-character ^KeyCode code held-modifier-codes]
   (KeyEvent.
     #_event-type event-type
     #_character (if (= KeyEvent/KEY_TYPED event-type) typed-character KeyEvent/CHAR_UNDEFINED)
     #_text (if (= KeyEvent/KEY_TYPED event-type) "" (.getName code))
     #_code (if (= KeyEvent/KEY_TYPED event-type) KeyCode/UNDEFINED code)
-    #_shift-down false
-    #_control-down false
-    #_alt-down false
-    #_meta-down false))
+    #_shift-down (contains? held-modifier-codes KeyCode/SHIFT)
+    #_control-down (contains? held-modifier-codes KeyCode/CONTROL)
+    #_alt-down (contains? held-modifier-codes KeyCode/ALT)
+    #_meta-down (contains? held-modifier-codes KeyCode/META)))
 
 (defn- dispatch-key! [el event-type key]
   (on-ui-thread
-    (let [{:keys [scene node]} (resolve-input-target el)
+    (let [{:keys [^Scene scene node]} (resolve-input-target el)
           focus-owner (.getFocusOwner ^Scene scene)
-          code (cond
-                 (instance? KeyCode key) key
-                 (keyword? key) (KeyCode/valueOf (enum-keyword->name key))
-                 :else (throw (IllegalArgumentException. (str "Unsupported key: " key))))
+          code (normalize-key-code key)
           character (.getChar ^KeyCode code)
           typed-character (when (and (= 1 (count character)) (<= (int \space) (int (first character))))
-                            character)]
+                            character)
+          held-modifier-codes (cond
+                                (and (= KeyEvent/KEY_PRESSED event-type)
+                                     (modifier-key-codes code))
+                                (update-held-modifier-codes! scene conj code)
+
+                                :else
+                                (held-modifier-codes scene))]
       (when (nil? focus-owner)
         (throw (IllegalStateException. "Key input requires a focused node")))
       (when-not (node-descendant? node focus-owner)
         (throw (IllegalArgumentException. "Key input target does not contain the focused node")))
-      (SceneHelper/processKeyEvent scene (key-event event-type typed-character code))
-      (when (and (= KeyEvent/KEY_PRESSED event-type) typed-character)
-        (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED typed-character code)))
+      (try
+        (SceneHelper/processKeyEvent scene (key-event event-type typed-character code held-modifier-codes))
+        (when (and (= KeyEvent/KEY_PRESSED event-type) typed-character)
+          (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED typed-character code held-modifier-codes)))
+        (finally
+          (when (and (= KeyEvent/KEY_RELEASED event-type) (modifier-key-codes code))
+            (update-held-modifier-codes! scene disj code))))
       focus-owner)))
 
 (defn key-press!
@@ -415,7 +442,7 @@
 
 ;; region mouse input
 
-(defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button]
+(defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button held-modifier-codes]
   (MouseEvent.
     #_event-type event-type
     #_x (.getX scene-point)
@@ -424,10 +451,10 @@
     #_screen-y (.getY screen-point)
     #_button button
     #_click-count 1
-    #_shift-down false
-    #_control-down false
-    #_alt-down false
-    #_meta-down false
+    #_shift-down (contains? held-modifier-codes KeyCode/SHIFT)
+    #_control-down (contains? held-modifier-codes KeyCode/CONTROL)
+    #_alt-down (contains? held-modifier-codes KeyCode/ALT)
+    #_meta-down (contains? held-modifier-codes KeyCode/META)
     #_primary-button-down (identical? MouseButton/PRIMARY button)
     #_middle-button-down (identical? MouseButton/MIDDLE button)
     #_secondary-button-down (identical? MouseButton/SECONDARY button)
@@ -450,7 +477,8 @@
                    (instance? MouseButton button) button
                    (keyword? button) (MouseButton/valueOf (enum-keyword->name button))
                    :else (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
-          event (mouse-event event-type scene-point screen-point button)
+          held-modifier-codes (held-modifier-codes scene)
+          event (mouse-event event-type scene-point screen-point button held-modifier-codes)
           captured-target (atom nil)
           handler (reify EventHandler
                     (handle [_ event]
@@ -461,7 +489,7 @@
         (let [actual @captured-target]
           (when-not (and (instance? Node actual) (node-descendant? node actual))
             (when (= MouseEvent/MOUSE_PRESSED event-type)
-              (SceneHelper/processMouseEvent scene (mouse-event MouseEvent/MOUSE_RELEASED scene-point screen-point button)))
+              (SceneHelper/processMouseEvent scene (mouse-event MouseEvent/MOUSE_RELEASED scene-point screen-point button held-modifier-codes)))
             (throw (ex-info "Mouse interaction resolved to a different element" {:el actual})))
           actual)
         (finally

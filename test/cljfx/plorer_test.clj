@@ -440,6 +440,152 @@
         (fx-sync (fn close-stage []
                    (.close stage)))))))
 
+(deftest mouse-input-press-and-release-simulate-single-click
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-single-click-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target"))
+                        root (group target)]
+                    (.addEventHandler target MouseEvent/MOUSE_CLICKED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:clicked (.getClickCount event) (.getButton event)]))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [target (plorer/one "#target")]
+        (is (= target (plorer/mouse-press! target :primary)))
+        (is (= target (plorer/mouse-release! target :primary)))
+        (is (= [[:clicked 1 MouseButton/PRIMARY]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest mouse-input-press-and-release-simulate-double-click
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-double-click-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target"))
+                        root (group target)]
+                    (.addEventHandler target MouseEvent/MOUSE_CLICKED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:clicked (.getClickCount event) (.getButton event)]))))
+                    (doto (Stage.)
+                      (.setScene (Scene. root 100.0 100.0))
+                      (.show)))))]
+    (try
+      (let [target (plorer/one "#target")]
+        (is (= target (plorer/mouse-press! target :primary)))
+        (is (= target (plorer/mouse-release! target :primary)))
+        (is (= target (plorer/mouse-press! target :primary)))
+        (is (= target (plorer/mouse-release! target :primary)))
+        (is (= [[:clicked 1 MouseButton/PRIMARY]
+                [:clicked 2 MouseButton/PRIMARY]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest mouse-input-with-held-modifier-keys-simulates-modifier-click
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-modifier-click-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target MouseEvent/MOUSE_CLICKED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj {:alt-down (.isAltDown event)
+                                                              :control-down (.isControlDown event)
+                                                              :shift-down (.isShiftDown event)
+                                                              :meta-down (.isMetaDown event)}))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [target (plorer/one "#target")
+            cases [{:name "alt-click" :key :alt :expected {:alt-down true :control-down false :shift-down false :meta-down false}}
+                   {:name "ctrl-click" :key :control :expected {:alt-down false :control-down true :shift-down false :meta-down false}}
+                   {:name "shift-click" :key :shift :expected {:alt-down false :control-down false :shift-down true :meta-down false}}
+                   {:name "meta-click" :key :meta :expected {:alt-down false :control-down false :shift-down false :meta-down true}}
+                   {:name "alt-click-via-keycode" :key KeyCode/ALT :expected {:alt-down true :control-down false :shift-down false :meta-down false}}]]
+        (doseq [{:keys [name key expected]} cases]
+          (testing name
+            (reset! events [])
+            (is (= target (plorer/key-press! target key)))
+            (is (= target (plorer/mouse-press! target :primary)))
+            (is (= target (plorer/mouse-release! target :primary)))
+            (is (= target (plorer/key-release! target key)))
+            (is (= [expected] @events)))))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
+(deftest key-input-includes-held-modifier-flags
+  (let [events (atom [])
+        stage (fx-sync
+                (fn create-stage-for-key-modifier-input []
+                  (let [target (doto (Rectangle. 100.0 100.0)
+                                 (.setId "target")
+                                 (.setFocusTraversable true))
+                        root (group target)
+                        stage (doto (Stage.)
+                                (.setScene (Scene. root 100.0 100.0))
+                                (.show)
+                                (.requestFocus))]
+                    (.addEventHandler target KeyEvent/KEY_PRESSED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:pressed
+                                                              (.getCode event)
+                                                              (.isShiftDown event)]))))
+                    (.addEventHandler target KeyEvent/KEY_TYPED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:typed
+                                                              (.getCharacter event)
+                                                              (.isShiftDown event)]))))
+                    (.addEventHandler target KeyEvent/KEY_RELEASED
+                                      (reify EventHandler
+                                        (handle [_ event]
+                                          (swap! events conj [:released
+                                                              (.getCode event)
+                                                              (.isShiftDown event)]))))
+                    (.requestFocus target)
+                    stage)))]
+    (try
+      (let [target (plorer/one "#target")]
+        (fx-sync (fn await-focus []
+                   (is (= target (.getFocusOwner (.getScene target))))))
+        (is (= target (plorer/key-press! target :shift)))
+        (is (= target (plorer/key-press! target :a)))
+        (is (= target (plorer/key-release! target :a)))
+        (is (= target (plorer/key-release! target :shift)))
+        (is (= target (plorer/key-press! target :a)))
+        (is (= target (plorer/key-release! target :a)))
+        (is (= [[:pressed KeyCode/SHIFT true]
+                [:pressed KeyCode/A true]
+                [:typed "A" true]
+                [:released KeyCode/A true]
+                [:released KeyCode/SHIFT true]
+                [:pressed KeyCode/A false]
+                [:typed "A" false]
+                [:released KeyCode/A false]]
+               @events)))
+      (finally
+        (fx-sync (fn close-stage []
+                   (.close stage)))))))
+
 (deftest key-input-dispatches-pressed-typed-and-released-to-focused-node
   (let [events (atom [])
         stage (fx-sync

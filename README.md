@@ -4,135 +4,47 @@
 [![Clojars Project](https://img.shields.io/clojars/v/io.github.cljfx/plorer.svg)](https://clojars.org/io.github.cljfx/plorer)
 [![License](https://img.shields.io/github/license/cljfx/plorer)](LICENSE)
 
-A small library for exploring and driving the live JavaFX scene graph from a Clojure REPL.
-
-It is built for programmatic inspection and interaction: enumerate supported properties, inspect tree structure, query nodes/windows/scenes, and send synthetic key and mouse events.
-
-Perfect if your coding agent has access to your REPL.
+Explore and drive a running JavaFX application from its Clojure REPL. Useful for coding agents with REPL access: inspect the live scene graph, find controls, and interact through synthetic keyboard and mouse events without desktop focus.
 
 ## Installation
 
 Using `deps.edn`:
+
 ```clojure
 io.github.cljfx/plorer {:mvn/version "1.25"}
 ```
-Using `lein`:
+
+Using Leiningen:
+
 ```clojure
 [io.github.cljfx/plorer "1.25"]
 ```
 
-## Getting Started
+## Getting started
 
-Require `cljfx.plorer` in your REPL before using the functions in this section:
-
-```clojure
-(require 'cljfx.plorer)
-```
-
-In this library, `el` means a JavaFX scene-graph element: a `Node`, `Scene`, `Window`, or synthetic `ROOT`.
-
-`cljfx.plorer` models the live scene graph as a tree rooted at that synthetic `ROOT`: `ROOT -> Window -> Scene -> scene root -> descendant nodes`, with `Parent` nodes contributing their children and `SubScene` contributing its root.
-
-### Props
-
-`props` reads supported logical properties from an element.
-
-Supported keys come from JavaFX `fooProperty()` accessors and observable-list `getFoo()` getters. Unsupported keys are omitted, while supported keys with `nil` values are still included.
+Run this in your application's REPL. The example assumes one open window and a text field whose ID is `name`; adapt the selector to your application.
 
 ```clojure
-(props el)                            ;; read all supported props
-(props el :only [:id :text :visible]) ;; limit reads to selected props
-;;=> {:id "name", :text "Name", :visible true, ...}
+(require '[cljfx.plorer :as p])
+
+;; Find a window and inspect its contents.
+(p/all javafx.stage.Window)
+(def window (p/one javafx.stage.Window))
+(p/tree window :depth 3 :props [:id :text])
+
+;; Find a field and click its center.
+(def field (p/one window "#name"))
+(p/mouse-click! window (p/point field 0.5 0.5) :primary)
+
+;; Type "hi!" using the virtual US keyboard.
+(doseq [key [:h :i]]
+  (p/key-tap! window key))
+(p/key-chord! window [:shift :digit1])
+
+;; Inspect the result.
+(p/props field :only [:text])
 ```
 
-### Trees
-
-`tree` builds a nested representation of an element and its children.
-
-If `el` is omitted, `tree` starts from `ROOT`. Every returned item contains `:el`, `:props` are included only when requested, and `:depth` is used for limiting returned tree depth.
-
-```clojure
-(tree)                       ;; full tree from ROOT
-(tree el)                    ;; full subtree for el
-(tree el :depth 1)           ;; el and immediate children
-(tree :props [:id :visible]) ;; start from ROOT and include selected props
-
-{:el el
- :props {:id "root"}
- :children [{:el child-1}
-            {:el child-2}]}
-```
-
-### Queries
-
-`all` and `one` query that same tree.
-
-Queries start from an optional `el`, or from `ROOT` when `el` is omitted. Plain selector steps traverse descendants in that tree, while `>` makes the next step direct-child only. `all` returns a vector, and `one` throws unless there is exactly one match.
-
-Selectors can be Java classes such as `Text`, string shorthands such as `"#id"`, `".primary"`, or `"#id.primary.large"`, maps that constrain a single element, predicate functions or vars, and the `*` wildcard.
-
-Map selectors build on `props`:
-
-- Plain keys read logical properties.
-- Plain values use equality.
-- Function or var values are treated as predicates.
-- `:fx.plorer/class` matches by class.
-- `:fx.plorer/pred` matches on the whole element.
-- `:fx.plorer/style-classes` requires a subset of CSS classes.
-
-```clojure
-(all > Window)                                ;; root windows
-(all Text)                                    ;; all Text descendants
-(all root Text)                               ;; all Text descendants under root
-(all "#assets")                               ;; match by id
-(all ".primary")                              ;; match by CSS class
-(all "#assets.primary")                       ;; match id and CSS class
-(all "#assets" Text)                          ;; all Texts under #assets
-(all VBox > Text)                             ;; direct Text children of each VBox
-(all {:text "Save"})                          ;; property equality
-(all {:id some?})                             ;; property predicate
-(all {:fx.plorer/class Text :id "name"})      ;; class and property together
-(all {:fx.plorer/style-classes #{"primary"}}) ;; CSS class subset match
-(all {:fx.plorer/pred #(instance? Text %)})   ;; whole-element predicate
-(one root "#name")                            ;; require exactly one match under root
-(one "#name")                                 ;; require exactly one match
-```
-
-### Key Input
-
-`key-press!` and `key-release!` send synthetic JavaFX key events.
-
-`el` is optional here; when omitted, key input starts from the synthetic `ROOT`.
-
-Keys may be keywords such as `:enter`, `:tab`, `:a`, `:shift`, `:control`, `:alt`, `:meta`, or another `KeyCode` value. Events are dispatched through the scene's current focus owner, and printable key presses also emit `KEY_TYPED`. Calls fail if there is no focused node or if the focused node is outside the requested target subtree.
-
-```clojure
-(key-press! :enter)
-(key-release! :enter)
-(key-press! el :enter)
-(key-release! el :enter)
-
-;; invoke Ctrl/Cmd+A, then Ctrl/Cmd+C on the focused field
-(let [shortcut-key (if mac? :meta :control)]
-  (key-press! field shortcut-key)
-  (key-press! field :a)
-  (key-release! field :a)
-  (key-press! field :c)
-  (key-release! field :c)
-  (key-release! field shortcut-key))
-```
-
-### Mouse Input
-
-`mouse-press!` and `mouse-release!` send synthetic JavaFX mouse events.
-
-`el` is optional here; when omitted, mouse input starts from the synthetic `ROOT`.
-
-Buttons may be `:primary`, `:middle`, `:secondary`, or a `MouseButton` value. The event is aimed at the visual center of `el`, but actual dispatch goes through JavaFX picking, and the returned value is the picked node. Calls fail if the target has no scene or showing coordinates, or if picking resolves to a different element; failed presses send a balancing release first.
-
-```clojure
-(mouse-press! :primary)
-(mouse-release! :primary)
-(mouse-press! el :primary)
-(mouse-release! el :primary)
-```
+- Calls run synchronously on the JavaFX thread; no `Platform/runLater` is needed. Mouse input requires a showing window, but desktop focus is not required.
+- Input targets a window or scene. Omitting the target requires exactly one open window. Keyboard events follow the scene's current focus owner.
+- Mouse positions are `[x y]` in scene logical pixels, measured from the content area's top-left. `point` converts relative positions within a node's layout bounds to those coordinates: `0 0` is top-left, `0.5 0.5` is center, and `1 1` is bottom-right.

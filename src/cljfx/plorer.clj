@@ -1,36 +1,40 @@
 (ns cljfx.plorer
-  "Inspect and query JavaFX scene graphs from Clojure.
-   
-  `el` is a scene graph element, e.g., Node, Window, Scene, or synthetic ROOT.
+  "Explore and drive a running JavaFX application from its Clojure REPL.
 
-  Public entry points:
-  - `props` for reading supported properties from an el
-  - `tree` for building a nested representation of an el and its children
-  - `all` and `one` for querying the live JavaFX graph
+  Calls run synchronously on the JavaFX thread; no Platform/runLater is needed.
+  Input uses synthetic events and works without desktop focus. Application work
+  scheduled by event handlers may finish later.
 
-  Examples:
+  Start with tree/props to inspect, all/one to find, point to locate, and
+  mouse-click!/key-tap!/key-chord! to interact. Separate press/release functions
+  let you hold keys or buttons across calls.
 
-  ```clojure
-  (props el :only [:id :text])
-  (tree :depth 3)
-  (tree el :props [:id])
-  (all Text)
-  (one \"#root\")
-  (key-press! el :alt)
-  (mouse-press! el :primary)
-  (mouse-release! el :primary)
-  (key-release! el :alt)
-  ```"
+  Inspection accepts a Node, Scene, Window, or synthetic root (called el in
+  signatures). The root contains all open windows. Queries search descendants;
+  tree includes its starting element. Results contain live JavaFX objects.
+  Input accepts a Window, Scene, or synthetic root, never a Node. Omitting the
+  input target requires exactly one open window. Mouse input picks at scene
+  coordinates; keyboard input follows that scene's current focus owner.
+
+  Example (p is the alias used throughout these docstrings):
+    (require '[cljfx.plorer :as p])
+    (p/all javafx.stage.Window)
+    (def window (p/one javafx.stage.Window)) ; assumes one open window
+    (p/tree window :depth 3 :props [:id :text])
+    (def field (p/one window \"#name\")) ; replace with a field ID found above
+    (p/mouse-click! window (p/point field 0.5 0.5) :primary)
+    (p/key-tap! window :a)
+    (p/props field :only [:text])"
   (:require [clojure.string :as str])
   (:import [com.sun.javafx.scene SceneHelper]
            [java.beans Introspector]
            [java.lang.reflect Method Modifier]
-           [java.util ArrayDeque WeakHashMap]
+           [java.util ArrayDeque Locale WeakHashMap]
            [javafx.application Platform]
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
            [javafx.event EventHandler]
-           [javafx.geometry Bounds Point2D]
+           [javafx.geometry Point2D]
            [javafx.scene Node Parent Scene SubScene]
            [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult]
            [javafx.stage Window]))
@@ -47,13 +51,16 @@
        (let [[status# value#] @result#]
          (case status# ::ok value# ::err (throw value#))))))
 
+(defn- finite-number? [x]
+  (and (number? x) (Double/isFinite (double x))))
+
 ;; endregion
 
 ;; region props
 
 (defn- bean-stem->prop-key [stem]
   (->> (re-seq #"[A-Z]+(?=$|[A-Z][a-z0-9])|[A-Z]?[a-z0-9]+" stem)
-       (map str/lower-case)
+       (map #(.toLowerCase ^String % Locale/ROOT))
        (str/join "-")
        keyword))
 
@@ -94,20 +101,15 @@
         (.getMethods ^Class class)))))
 
 (defn props
-  "Return a map of supported property values for `el`.
+  "Return a map of supported property values for el (a JavaFX element).
 
-  Behavior:
-  - returned keys are the supported logical props for `el`
-  - unsupported keys are omitted
-  - supported keys with nil values are included
-  - `:only` limits which keys are read
+  With no :only, discover all supported keys. :only selects keys to read;
+  unsupported keys are omitted, while supported keys with nil values remain.
+  Keys are kebab-case names from JavaFX property accessors and observable-list
+  getters, e.g. :text, :id, :style-class. Values can include live JavaFX objects.
 
-  Example:
-
-  ```clojure
-  (props el)
-  (props text-el :only [:text :id])
-  ```"
+    (p/props node)
+    (p/props node :only [:id :text :visible])"
   [el & {:keys [only]}]
   (on-ui-thread
     (let [prop-getters (class-prop-getters (class el))]
@@ -146,23 +148,20 @@
       (instance? Node x)))
 
 (defn ^{:arglists '([el? & {:keys [depth props]}])} tree
-  "Return a tree for `el`, or from the synthetic root when `el` is omitted.
+  "Return a nested map describing el and its children.
 
-  Behavior:
-  - with no `el`, traversal starts from the synthetic root
-  - each node always includes `:el`
-  - `:props` is included only when requested
-  - `:children` is included unless `:depth` is 0
-  - `:depth 0` returns just the current node
-  - `:depth 1` includes immediate children
+  el may be a Node, Scene, Window, or synthetic root. Omit it to inspect all
+  open windows under that root. Each entry has :el (the live object) and a
+  vector of :children. :props adds a property map; see props for supported keys.
+  :depth limits child traversal: 0 omits :children, 1 includes immediate
+  children, and omission traverses the full subtree.
 
-  Examples:
+  Traversal follows windows to scenes to scene roots, then node children;
+  SubScenes contribute their roots. Start with a small depth to limit output.
 
-  ```clojure
-  (tree el)
-  (tree el :props [:id])
-  (tree :depth 3 :props [:id :title])
-  ```"
+    (p/tree :depth 2 :props [:title :id])
+    (p/tree window :depth 3 :props [:id :text])
+    ;; entry shape: {:el node :props {:id \"name\"} :children [...]}"
   [& args]
   (let [[el options] (if (even? (count args))
                        [ROOT args]
@@ -304,49 +303,46 @@
       (normalize-query-steps selectors))))
 
 (defn ^{:arglists '([el? & selectors])} all
-  "Return all matching els for `selectors`.
+  "Return a vector of distinct live elements matching the selectors.
 
-  Queries start from `el` when provided, otherwise from `ROOT`, and run left
-  to right. `>` makes the next step direct-child only.
+  Optional el is a Node, Scene, Window, or synthetic root; omission searches
+  all open windows. Each selector searches descendants of the previous matches,
+  excluding the starting elements. Insert > before a selector to search only
+  direct children. With no selectors, returns [el] (the root if omitted).
 
-  Selector forms:
-  - `Class` matches by `instance?`
-  - `*` matches anything
-  - strings match `#id`, `.style-class`, or `#id.style-class`
-  - functions and vars that resolve to functions are predicates
-  - maps match el properties (equality or predicate)
+  Selectors:
+  - Java class: match instances, e.g. javafx.scene.control.Button.
+  - String: #id, .style-class, or combinations such as #id.primary.large.
+  - Function or var: predicate on the element. * matches any element.
+  - Map: all entries must match. Ordinary keys read props; function/var values
+    are predicates on a property, other values use equality (including sets).
+    Unsupported properties do not match, even when the expected value is nil.
+    :fx.plorer/class matches a class, :fx.plorer/pred tests the whole element,
+    and :fx.plorer/style-classes requires all listed CSS classes.
 
-  Map keys:
-  - ordinary keys compare against el properties
-  - `:fx.plorer/class` adds a class match
-  - `:fx.plorer/pred` adds an el predicate
-  - `:fx.plorer/style-classes` requires all listed CSS classes
+  Use > and * as unquoted clojure.core functions, not keywords or strings.
 
-  Example:
+    (p/all javafx.stage.Window)
+    (p/all window \"#form\" > \".field\")
+    (p/all window {:text \"Save\"})
+    (p/all {:fx.plorer/class javafx.stage.Stage :title \"My app\"})
+    (p/all window {:id some? :fx.plorer/style-classes #{\"primary\"}})
 
-  ```clojure
-  (all root Text)
-  (all > Window)
-  (all VBox > Text)
-  (all {:id some?})
-  (all \"#id.class.other-class\")
-  (all {:fx.plorer/class Text :id \"title\" :fx.plorer/style-classes #{\"primary\"}})
-  ```"
+  See one to require exactly one match, props to discover property keys."
   [& args]
   (on-ui-thread (execute-query args)))
 
 (defn ^{:arglists '([el? & selectors])} one
-  "Return the only matching el for `selectors`.
+  "Return the single matching live element; throw on zero or multiple matches.
 
-  Same selector forms as `all`. Throws `IllegalStateException` on 0 or many
-  matches.
+  Optional el is a Node, Scene, Window, or synthetic root; omission searches
+  all open windows. Selectors search descendants. Accepts the same selectors
+  as all, including classes, #id/.class strings, property maps, and predicates.
+  See all for chaining and direct-child syntax. Throws IllegalStateException
+  unless exactly one element matches; use all to inspect ambiguous matches.
 
-  Example:
-
-  ```clojure
-  (one root \"#title\")
-  (one \"#root\")
-  ```"
+    (p/one javafx.stage.Window)
+    (p/one window \"#name\")"
   [& args]
   (let [results (apply all args)]
     (if (= 1 (count results))
@@ -355,43 +351,100 @@
 
 ;; endregion
 
+;; region geometry
+
+(defn point
+  "Return scene coordinates [x y] for a relative position within a node.
+
+  x and y must be numbers from 0 to 1 along the node's local layout bounds:
+  0,0 is top-left; 0.5,0.5 is center; 1,1 is bottom-right. The Node must belong
+  to a Scene. Converts through ancestor transforms and enclosing SubScenes
+  into the outer scene's coordinates, suitable for mouse input.
+
+  Reads current geometry on the JavaFX thread. The result is a snapshot;
+  layout changes, clipping, or overlapping nodes can affect what gets clicked.
+  Exact edges may not be pickable; use e.g. 0.95 to aim just inside an edge.
+
+    (p/point node 0.5 0.5)
+    (p/mouse-click! window (p/point node 0.25 0.5) :primary)"
+  [node x y]
+  (on-ui-thread
+    (when-not (instance? Node node)
+      (throw (IllegalArgumentException. "Point requires a Node")))
+    (when-not (and (finite-number? x) (<= 0 x 1)
+                   (finite-number? y) (<= 0 y 1))
+      (throw (IllegalArgumentException. "Point coordinates must be numbers from 0 to 1")))
+    (when-not (.getScene ^Node node)
+      (throw (IllegalStateException. "Point requires a node with a scene")))
+    (let [bounds (.getLayoutBounds ^Node node)
+          point (.localToScene ^Node node
+                               (+ (.getMinX bounds) (* (double x) (.getWidth bounds)))
+                               (+ (.getMinY bounds) (* (double y) (.getHeight bounds)))
+                               true)]
+      (when-not point
+        (throw (IllegalStateException. "Point could not be converted to scene coordinates")))
+      [(.getX point) (.getY point)])))
+
+;; endregion
+
 ;; region key input
 
-(defn- resolve-input-target [el]
+(defn- input-scene ^Scene [el]
   (cond
     (identical? ROOT el) (let [windows (vec (Window/getWindows))]
                            (when-not (= 1 (count windows))
                              (throw (IllegalStateException. (str "ROOT input target requires exactly one open window, got " (count windows)))))
                            (recur (first windows)))
-    (instance? Node el) (let [scene (.getScene ^Node el)]
-                          (when (nil? scene)
-                            (throw (IllegalStateException. "Input target requires a node with a scene")))
-                          {:scene scene
-                           :node el})
-    (instance? Scene el) (let [root (.getRoot ^Scene el)]
-                           (when (nil? root)
-                             (throw (IllegalStateException. "Input target requires a scene root")))
-                           {:scene el
-                            :node root})
-    (instance? Window el) (let [scene (.getScene ^Window el)]
-                            (when (nil? scene)
+    (instance? Scene el) el
+    (instance? Window el) (or (.getScene ^Window el)
                               (throw (IllegalStateException. "Input target requires a window with a scene")))
-                            (recur scene))
-    :else (throw (IllegalArgumentException. "Input target must be ROOT, a Window, a Scene, or a Node"))))
+    :else (throw (IllegalArgumentException. "Input target must be ROOT, a Window, or a Scene"))))
 
 (defn- enum-keyword->name [k]
-  (-> (name k) (str/replace "-" "_") str/upper-case))
-
-(defn- node-descendant? [ancestor node]
-  (loop [node node]
-    (cond
-      (nil? node) false
-      (identical? ancestor node) true
-      :else (recur (.getParent ^Node node)))))
+  (let [^String enum-name (str/replace (name k) "-" "_")]
+    (.toUpperCase enum-name Locale/ROOT)))
 
 (def ^:private modifier-key-codes #{KeyCode/ALT KeyCode/CONTROL KeyCode/META KeyCode/SHIFT})
 
-(def ^:private ^WeakHashMap scene->held-modifier-codes (WeakHashMap.))
+(def ^:private ^WeakHashMap scene->keyboard-state (WeakHashMap.))
+
+(def ^:private us-key-texts
+  (into {KeyCode/DIGIT0 ["0" ")"]
+         KeyCode/DIGIT1 ["1" "!"]
+         KeyCode/DIGIT2 ["2" "@"]
+         KeyCode/DIGIT3 ["3" "#"]
+         KeyCode/DIGIT4 ["4" "$"]
+         KeyCode/DIGIT5 ["5" "%"]
+         KeyCode/DIGIT6 ["6" "^"]
+         KeyCode/DIGIT7 ["7" "&"]
+         KeyCode/DIGIT8 ["8" "*"]
+         KeyCode/DIGIT9 ["9" "("]
+         KeyCode/BACK_QUOTE ["`" "~"]
+         KeyCode/MINUS ["-" "_"]
+         KeyCode/EQUALS ["=" "+"]
+         KeyCode/OPEN_BRACKET ["[" "{"]
+         KeyCode/CLOSE_BRACKET ["]" "}"]
+         KeyCode/BACK_SLASH ["\\" "|"]
+         KeyCode/SEMICOLON [";" ":"]
+         KeyCode/QUOTE ["'" "\""]
+         KeyCode/COMMA ["," "<"]
+         KeyCode/PERIOD ["." ">"]
+         KeyCode/SLASH ["/" "?"]
+         KeyCode/SPACE [" " " "]
+         KeyCode/MULTIPLY ["*" "*"]
+         KeyCode/ADD ["+" "+"]
+         KeyCode/SUBTRACT ["-" "-"]
+         KeyCode/DECIMAL ["." "."]
+         KeyCode/DIVIDE ["/" "/"]}
+        (concat
+          (map (fn [lower upper]
+                 [(KeyCode/valueOf (str upper)) [(str lower) (str upper)]])
+               "abcdefghijklmnopqrstuvwxyz"
+               "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+          (map (fn [digit]
+                 (let [text (str digit)]
+                   [(KeyCode/valueOf (str "NUMPAD" digit)) [text text]]))
+               "0123456789"))))
 
 (defn- normalize-key-code [key]
   (cond
@@ -399,20 +452,23 @@
     (keyword? key) (KeyCode/valueOf (enum-keyword->name key))
     :else (throw (IllegalArgumentException. (str "Unsupported key: " key)))))
 
+(defn- keyboard-state [^Scene scene]
+  (or (.get scene->keyboard-state scene) {:held-key-texts {} :caps-lock false}))
+
 (defn- held-modifier-codes [^Scene scene]
-  (or (.get scene->held-modifier-codes scene) #{}))
+  (let [held-key-texts (:held-key-texts (keyboard-state scene))]
+    (into #{} (filter #(contains? held-key-texts %)) modifier-key-codes)))
 
-(defn- update-held-modifier-codes!
-  [^Scene scene f & args]
-  (let [held-modifier-codes (apply f (held-modifier-codes scene) args)]
-    (.put scene->held-modifier-codes scene held-modifier-codes)
-    held-modifier-codes))
+(defn- us-key-text [^KeyCode code shift caps-lock]
+  (if-let [texts (get us-key-texts code)]
+    (texts (if (if (.isLetterKey code) (not= shift caps-lock) shift) 1 0))
+    ""))
 
-(defn- key-event [event-type typed-character ^KeyCode code held-modifier-codes]
+(defn- key-event [event-type text ^KeyCode code held-modifier-codes]
   (KeyEvent.
     #_event-type event-type
-    #_character (if (= KeyEvent/KEY_TYPED event-type) typed-character KeyEvent/CHAR_UNDEFINED)
-    #_text (if (= KeyEvent/KEY_TYPED event-type) "" (.getName code))
+    #_character (if (= KeyEvent/KEY_TYPED event-type) text KeyEvent/CHAR_UNDEFINED)
+    #_text (if (= KeyEvent/KEY_TYPED event-type) "" text)
     #_code (if (= KeyEvent/KEY_TYPED event-type) KeyCode/UNDEFINED code)
     #_shift-down (contains? held-modifier-codes KeyCode/SHIFT)
     #_control-down (contains? held-modifier-codes KeyCode/CONTROL)
@@ -421,60 +477,123 @@
 
 (defn- dispatch-key! [el event-type key]
   (on-ui-thread
-    (let [{:keys [^Scene scene node]} (resolve-input-target el)
+    (let [scene (input-scene el)
           focus-owner (.getFocusOwner ^Scene scene)
-          code (normalize-key-code key)
-          character (.getChar ^KeyCode code)
-          typed-character (when (and (= 1 (count character)) (<= (int \space) (int (first character))))
-                            character)
-          held-modifier-codes (cond
-                                (and (= KeyEvent/KEY_PRESSED event-type)
-                                     (modifier-key-codes code))
-                                (update-held-modifier-codes! scene conj code)
-
-                                :else
-                                (held-modifier-codes scene))]
+          code (normalize-key-code key)]
       (when (nil? focus-owner)
         (throw (IllegalStateException. "Key input requires a focused node")))
-      (when-not (node-descendant? node focus-owner)
-        (throw (IllegalArgumentException. "Key input target does not contain the focused node")))
-      (try
-        (SceneHelper/processKeyEvent scene (key-event event-type typed-character code held-modifier-codes))
-        (when (and (= KeyEvent/KEY_PRESSED event-type) typed-character)
-          (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED typed-character code held-modifier-codes)))
-        (finally
-          (when (and (= KeyEvent/KEY_RELEASED event-type) (modifier-key-codes code))
-            (update-held-modifier-codes! scene disj code))))
+      (let [{:keys [held-key-texts caps-lock]} (keyboard-state scene)
+            press (= KeyEvent/KEY_PRESSED event-type)
+            caps-lock (if (and press (= KeyCode/CAPS code) (not (contains? held-key-texts code)))
+                        (not caps-lock)
+                        caps-lock)
+            text (if press
+                   (us-key-text code (contains? held-key-texts KeyCode/SHIFT) caps-lock)
+                   (get held-key-texts code ""))]
+        (.put scene->keyboard-state scene
+              {:held-key-texts (if press (assoc held-key-texts code text) (dissoc held-key-texts code))
+               :caps-lock caps-lock})
+        (let [modifiers (held-modifier-codes scene)]
+          (SceneHelper/processKeyEvent scene (key-event event-type text code modifiers))
+          (when (and press (not (empty? text))
+                     (not-any? modifiers [KeyCode/CONTROL KeyCode/ALT KeyCode/META]))
+            (SceneHelper/processKeyEvent scene (key-event KeyEvent/KEY_TYPED text code modifiers)))))
       focus-owner)))
 
 (defn key-press!
-  "Dispatch a synthetic key press for `key` on `el`.
+  "Press a virtual US keyboard key; return the focus owner at the press.
 
-  `key` may be a `KeyCode` or a keyword such as `:enter`, `:tab`, `:escape`,
-  `:a`, `:shift`, `:control`, `:alt`, or `:meta`.
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  Events follow the scene's current focus owner; throws if none exists.
+  Desktop focus is not required. key is a javafx.scene.input.KeyCode or its
+  kebab-case keyword, e.g. :a, :digit1, :enter, :shift, :control, :meta.
+  Pair with key-release!, or use key-tap!/key-chord! for complete sequences.
 
-  Returns the focused node that received the event. Printable keys also emit a
-  synthetic `KEY_TYPED` event. Pair each call with `key-release!`, especially
-  for modifiers, to avoid leaking held-key state. Throws when there is no focus
-  owner or when the focused node is outside `el`."
+  Virtual keyboard behavior (independent of host layout and locale):
+  - Letters type lowercase; Shift uppercases them. :caps toggles Caps Lock
+    for letters, with Shift reversing it. Digits and punctuation use US
+    Shift pairs, e.g. :digit1 -> 1/!, :minus -> -/_, :slash -> /?.
+  - Printable keys emit KEY_PRESSED then KEY_TYPED, except while Control,
+    Alt, or Meta is held. Navigation, function, modifier, Enter, and Tab keys
+    emit no typed text. Unmapped keys still emit press/release events.
+  - Numpad digits and arithmetic keys always type their numeric characters.
+    Num Lock, Alt/Option character mappings, dead keys, and IME are not simulated.
+  - Held keys and Caps Lock are tracked per scene. Repeated presses repeat
+    input; a held Caps Lock key toggles only once. There is no repeat timer.
+
+    (p/key-press! window :shift)
+    (p/mouse-click! window [50 50] :primary)
+    (p/key-release! window :shift)"
   ([key]
    (dispatch-key! ROOT KeyEvent/KEY_PRESSED key))
   ([el key]
    (dispatch-key! el KeyEvent/KEY_PRESSED key)))
 
 (defn key-release!
-  "Dispatch a synthetic key release for `key` on `el`.
+  "Release a virtual key; return the focus owner at the release.
 
-  Accepts the same key forms as `key-press!` and returns the focused node that
-  received the event.
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  key is a javafx.scene.input.KeyCode or kebab-case keyword such as :shift.
+  Release follows the scene's current focus owner, which may differ from the
+  press target. Throws if there is no focus owner; desktop focus is not required.
 
-  Modifier state is tracked across `key-press!` and `key-release!`, so release
-  keys you press, e.g. `:shift`, `:control`, `:alt`, or `:meta`. Throws when
-  there is no focus owner or when the focused node is outside `el`."
+  Emits KEY_RELEASED with the text from the key's last press, or empty text
+  if it was not pressed. Clears the released key's modifier flag before dispatch.
+  See key-press! for virtual keyboard rules; use key-tap! for a complete tap.
+
+    (p/key-release! window :shift)"
   ([key]
    (dispatch-key! ROOT KeyEvent/KEY_RELEASED key))
   ([el key]
    (dispatch-key! el KeyEvent/KEY_RELEASED key)))
+
+(defn key-tap!
+  "Press and release one key; return the focus owner at the release.
+
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  key is a javafx.scene.input.KeyCode or kebab-case keyword, e.g. :a, :enter,
+  :tab, :escape, :digit1, :space. Uses a virtual US layout: printable keys type
+  text, Shift/Caps Lock affect case, and Control/Alt/Meta suppress typed text.
+  See key-press! for full keyboard rules and key-chord! for combinations.
+
+  Both events run on the JavaFX thread in the same scene, following its current
+  focus owner (which can change after Tab). Throws if no focus owner exists;
+  desktop focus is not required.
+
+    (p/key-tap! :enter)
+    (p/key-tap! window :a)"
+  ([key]
+   (key-tap! ROOT key))
+  ([el key]
+   (on-ui-thread
+     (let [scene (input-scene el)]
+       (key-press! scene key)
+       (key-release! scene key)))))
+
+(defn key-chord!
+  "Press keys in order and release them in reverse order; return nil.
+
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  keys is an ordered collection of javafx.scene.input.KeyCodes or kebab-case
+  keywords. Put modifiers first. Uses the virtual US keyboard; see key-press!
+  for its rules. Use :meta for Command shortcuts on macOS, :control for Ctrl.
+
+  The sequence runs on the JavaFX thread in one scene, following its current
+  focus owner. Throws if no focus owner exists; desktop focus is not required.
+  Keys in the chord end released; other held keys retain their state.
+
+    (p/key-chord! window [:shift :digit1]) ; type !
+    (p/key-chord! window [:control :shift :z])
+    (p/key-chord! window [:meta :a])      ; Command+A"
+  ([keys]
+   (key-chord! ROOT keys))
+  ([el keys]
+   (on-ui-thread
+     (let [scene (input-scene el)]
+       (doseq [key keys]
+         (key-press! scene key))
+       (doseq [key (reverse keys)]
+         (key-release! scene key))))))
 
 ;; endregion
 
@@ -493,30 +612,35 @@
     #_control-down (contains? held-modifier-codes KeyCode/CONTROL)
     #_alt-down (contains? held-modifier-codes KeyCode/ALT)
     #_meta-down (contains? held-modifier-codes KeyCode/META)
-    #_primary-button-down (identical? MouseButton/PRIMARY button)
-    #_middle-button-down (identical? MouseButton/MIDDLE button)
-    #_secondary-button-down (identical? MouseButton/SECONDARY button)
+    #_primary-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
+                               (identical? MouseButton/PRIMARY button))
+    #_middle-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
+                              (identical? MouseButton/MIDDLE button))
+    #_secondary-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
+                                 (identical? MouseButton/SECONDARY button))
     #_synthesized false
     #_popup-trigger false
     #_still-since-press false
     #_pick-result (PickResult. nil (.getX scene-point) (.getY scene-point))))
 
-(defn- dispatch-mouse! [el event-type button]
+(defn- dispatch-mouse! [el position event-type button]
   (on-ui-thread
-    (let [{:keys [^Scene scene ^Node node]} (resolve-input-target el)
-          bounds (.getLayoutBounds node)
-          center-of-node (Point2D. (+ (.getMinX ^Bounds bounds) (/ (.getWidth ^Bounds bounds) 2.0))
-                                   (+ (.getMinY ^Bounds bounds) (/ (.getHeight ^Bounds bounds) 2.0)))
-          scene-point (or (.localToScene node center-of-node)
-                          (throw (IllegalStateException. "Mouse input requires a node with scene coordinates")))
-          screen-point (or (.localToScreen node center-of-node)
-                           (throw (IllegalStateException. "Mouse input requires a showing node")))
+    (let [scene (input-scene el)
+          window (.getWindow scene)
+          _ (when-not (and window (.isShowing window))
+              (throw (IllegalStateException. "Mouse input requires a scene in a showing window")))
+          _ (when-not (and (vector? position) (= 2 (count position))
+                           (every? finite-number? position))
+              (throw (IllegalArgumentException. "Mouse position must be a vector [x y] of finite numbers")))
+          [x y] position
+          scene-point (Point2D. (double x) (double y))
+          screen-point (Point2D. (+ (.getX window) (.getX scene) (double x))
+                                 (+ (.getY window) (.getY scene) (double y)))
           button (cond
                    (instance? MouseButton button) button
                    (keyword? button) (MouseButton/valueOf (enum-keyword->name button))
                    :else (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
-          held-modifier-codes (held-modifier-codes scene)
-          event (mouse-event event-type scene-point screen-point button held-modifier-codes)
+          event (mouse-event event-type scene-point screen-point button (held-modifier-codes scene))
           captured-target (atom nil)
           handler (reify EventHandler
                     (handle [_ event]
@@ -524,41 +648,67 @@
       (.addEventFilter scene event-type handler)
       (try
         (SceneHelper/processMouseEvent scene event)
-        (let [actual @captured-target]
-          (when-not (and (instance? Node actual) (node-descendant? node actual))
-            (when (= MouseEvent/MOUSE_PRESSED event-type)
-              (SceneHelper/processMouseEvent scene (mouse-event MouseEvent/MOUSE_RELEASED scene-point screen-point button held-modifier-codes)))
-            (throw (ex-info "Mouse interaction resolved to a different element" {:el actual})))
-          actual)
+        @captured-target
         (finally
           (.removeEventFilter scene event-type handler))))))
 
 (defn mouse-press!
-  "Dispatch a synthetic mouse press for `button` on `el`.
+  "Press a mouse button at position [x y]; return the event target or nil.
 
-  `button` may be a `MouseButton` or one of `:primary`, `:middle`, or
-  `:secondary`.
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  The scene must be in a showing window; desktop focus is not required.
+  position is a vector of two finite numbers in scene logical pixels, measured
+  from the content area's top-left (excluding window decorations). button is
+  :primary, :middle, :secondary, or a javafx.scene.input.MouseButton.
 
-  Clicks the visual center of `el` and returns the picked node. Throws if `el`
-  is not showing, has no scene coordinates, or if a different node is picked.
-  Pair each call with `mouse-release!`; a failed press sends a balancing
-  release first."
-  ([button]
-   (dispatch-mouse! ROOT MouseEvent/MOUSE_PRESSED button))
-  ([el button]
-   (dispatch-mouse! el MouseEvent/MOUSE_PRESSED button)))
+  JavaFX picks the target at the position. Held virtual keyboard modifiers
+  apply. Pair with mouse-release!, or use mouse-click! for a complete click.
+  point converts a relative position within a node to scene coordinates.
+
+    (p/mouse-press! window (p/point node 0.5 0.5) :primary)"
+  ([position button]
+   (mouse-press! ROOT position button))
+  ([el position button]
+   (dispatch-mouse! el position MouseEvent/MOUSE_PRESSED button)))
 
 (defn mouse-release!
-  "Dispatch a synthetic mouse release for `button` on `el`.
+  "Release a mouse button at position [x y]; return the event target or nil.
 
-  Accepts the same button forms as `mouse-press!` and returns the picked node.
-  Supported button keywords are `:primary`, `:middle`, and `:secondary`.
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  The scene must be in a showing window; desktop focus is not required.
+  position is a vector of two finite numbers in scene logical pixels from the
+  content area's top-left. button is :primary, :middle, :secondary, or a
+  javafx.scene.input.MouseButton. Use point to obtain coordinates from a node.
 
-  The event uses the visual center of `el`. Throws if `el` is not showing, has
-  no scene coordinates, or if a different node is picked."
-  ([button]
-   (dispatch-mouse! ROOT MouseEvent/MOUSE_RELEASED button))
-  ([el button]
-   (dispatch-mouse! el MouseEvent/MOUSE_RELEASED button)))
+  JavaFX keeps the press target through release, even at a different position.
+  Use mouse-click! for a press/release pair at one position.
+
+    (p/mouse-release! window [50 50] :primary)"
+  ([position button]
+   (mouse-release! ROOT position button))
+  ([el position button]
+   (dispatch-mouse! el position MouseEvent/MOUSE_RELEASED button)))
+
+(defn mouse-click!
+  "Press and release a mouse button at one position; return the release target or nil.
+
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  The scene must be in a showing window; desktop focus is not required.
+  position is a vector [x y] in scene logical pixels from the content area's
+  top-left, excluding window decorations. Use point to locate a node.
+  button is :primary, :middle, :secondary, or a javafx.scene.input.MouseButton.
+
+  Both events run on the JavaFX thread in the same scene. JavaFX picks the
+  target at the position, with any held virtual keyboard modifiers applied.
+
+    (p/mouse-click! [50 50] :primary)
+    (p/mouse-click! window (p/point node 0.5 0.5) :primary)"
+  ([position button]
+   (mouse-click! ROOT position button))
+  ([el position button]
+   (on-ui-thread
+     (let [scene (input-scene el)]
+       (mouse-press! scene position button)
+       (mouse-release! scene position button)))))
 
 ;; endregion

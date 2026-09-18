@@ -2,8 +2,7 @@
   (:require [cemerick.pomegranate.aether :as aether]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.tools.build.api :as b])
-  (:import [java.io Console]))
+            [clojure.tools.build.api :as b]))
 
 (set! *warn-on-reflection* true)
 
@@ -52,16 +51,14 @@
 
 (defn deploy
   [_]
-  (let [{:keys [jar-file pom-file version]} (jar nil)]
-    (let [^Console console (System/console)]
-      (when-not console
-        (throw (IllegalStateException. "Missing console for Clojars credentials")))
+  (let [token (System/getenv "CLOJARS_TOKEN")]
+    (when (str/blank? token)
+      (throw (IllegalStateException. "CLOJARS_TOKEN must be set")))
+    (let [{:keys [jar-file pom-file version] :as artifact} (jar nil)]
       (aether/deploy :coordinates [lib version]
                      :jar-file jar-file
                      :pom-file pom-file
                      :repository {"clojars" {:url "https://clojars.org/repo"
-                                             :username (.readLine console "Clojars username: " (object-array 0))
-                                             :password (String/valueOf (.readPassword console "Clojars token: " (object-array 0)))}}))
-    {:jar-file jar-file
-     :pom-file pom-file
-     :version version}))
+                                             :username "vlaaad"
+                                             :password token}})
+      artifact)))

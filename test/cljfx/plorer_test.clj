@@ -1461,7 +1461,10 @@
         (fx-sync
           (fn []
             (let [content (Rectangle. 1200.0 1500.0)
-                  pane (doto (ScrollPane. content) (.setPrefSize 300.0 300.0))
+                  ;; Keep fractional scroll distances independent of display scaling.
+                  pane (doto (ScrollPane. content)
+                         (.setPrefSize 300.0 300.0)
+                         (.setSnapToPixel false))
                   list-view (doto (ListView.) (.setPrefSize 300.0 300.0) (.setFixedCellSize 24.0))
                   root (HBox.)
                   scene (Scene. root 600.0 300.0)]

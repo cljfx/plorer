@@ -1,43 +1,59 @@
 (ns cljfx.plorer
   "Explore and drive a running JavaFX application from its Clojure REPL.
 
-  Calls run synchronously on the JavaFX thread; no Platform/runLater is needed.
-  Input uses synthetic events and works without desktop focus. Application work
-  scheduled by event handlers may finish later.
+  Inspection returns live JavaFX objects. Start at a node, scene, or window;
+  omitting the starting element inspects all open windows.
 
-  Start with tree/props to inspect, all/one to find, point to locate, and
-  mouse-click!/key-tap!/key-chord! to interact. Separate press/release functions
-  let you hold keys or buttons across calls.
+  Input targets a scene or window; omitting the target requires exactly one
+  open window. Mouse positions use scene coordinates, and keyboard input goes
+  to the scene's focused node. The desktop pointer is not moved.
+  Mouse input requires a showing window.
 
-  Inspection accepts a Node, Scene, Window, or synthetic root (called el in
-  signatures). The root contains all open windows. Queries search descendants;
-  tree includes its starting element. Results contain live JavaFX objects.
-  Input accepts a Window, Scene, or synthetic root, never a Node. Omitting the
-  input target requires exactly one open window. Mouse input picks at scene
-  coordinates; keyboard input follows that scene's current focus owner.
+  Call functions directly from the REPL; thread scheduling is handled for you.
+  Calls finish synchronously, but application work they trigger may finish later.
 
-  Example (p is the alias used throughout these docstrings):
+  Example with one open window (p is the alias used in these docstrings):
     (require '[cljfx.plorer :as p])
-    (p/all javafx.stage.Window)
-    (def window (p/one javafx.stage.Window)) ; assumes one open window
+
+    ;; Inspect the window and find a text field by an ID from the tree.
+    (def window (p/one javafx.stage.Window))
     (p/tree window :depth 3 :props [:id :text])
-    (def field (p/one window \"#name\")) ; replace with a field ID found above
+    (def field (p/one window \"#name\")) ; replace with your field's ID
+
+    ;; Click the field's center and type hi!.
     (p/mouse-click! window (p/point field 0.5 0.5) :primary)
-    (p/key-tap! window :a)
-    (p/props field :only [:text])"
+    (doseq [key [:h :i]] (p/key-tap! window key))
+    (p/key-chord! window [:shift :digit1])
+
+    ;; Read the result from the live object.
+    (p/props field :only [:text])
+
+    ;; Hover over a scrollable list and scroll down.
+    (def items (p/one window \"#items\")) ; replace with your list's ID
+    (p/mouse-move! window (p/point items 0.5 0.5))
+    (p/scroll! window (p/point items 0.5 0.5) 0 -100)
+
+    ;; Take a screenshot.
+    (p/screenshot! window)"
   (:require [clojure.string :as str])
   (:import [com.sun.javafx.scene SceneHelper]
+           [com.sun.javafx.tk TKSceneListener]
+           [java.awt.image BufferedImage]
            [java.beans Introspector]
-           [java.lang.reflect Method Modifier]
+           [java.io File IOException]
+           [java.lang.reflect Constructor Method Modifier]
            [java.util ArrayDeque Locale WeakHashMap]
            [javafx.application Platform]
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
            [javafx.event EventHandler]
            [javafx.geometry Point2D]
-           [javafx.scene Node Parent Scene SubScene]
-           [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult]
-           [javafx.stage Window]))
+           [javafx.scene Node Parent Scene SnapshotParameters SubScene]
+           [javafx.scene.image PixelFormat WritableImage]
+           [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult ScrollEvent]
+           [javafx.scene.paint Color]
+           [javafx.stage Window]
+           [javax.imageio ImageIO]))
 
 (set! *warn-on-reflection* true)
 
@@ -406,7 +422,7 @@
 
 (def ^:private modifier-key-codes #{KeyCode/ALT KeyCode/CONTROL KeyCode/META KeyCode/SHIFT})
 
-(def ^:private ^WeakHashMap scene->keyboard-state (WeakHashMap.))
+(def ^:private ^WeakHashMap scene->input-state (WeakHashMap.))
 
 (def ^:private us-key-texts
   (into {KeyCode/DIGIT0 ["0" ")"]
@@ -452,11 +468,12 @@
     (keyword? key) (KeyCode/valueOf (enum-keyword->name key))
     :else (throw (IllegalArgumentException. (str "Unsupported key: " key)))))
 
-(defn- keyboard-state [^Scene scene]
-  (or (.get scene->keyboard-state scene) {:held-key-texts {} :caps-lock false}))
+(defn- input-state [^Scene scene]
+  (or (.get scene->input-state scene)
+      {:held-key-texts {} :caps-lock false :held-mouse-buttons []}))
 
 (defn- held-modifier-codes [^Scene scene]
-  (let [held-key-texts (:held-key-texts (keyboard-state scene))]
+  (let [held-key-texts (:held-key-texts (input-state scene))]
     (into #{} (filter #(contains? held-key-texts %)) modifier-key-codes)))
 
 (defn- us-key-text [^KeyCode code shift caps-lock]
@@ -482,7 +499,7 @@
           code (normalize-key-code key)]
       (when (nil? focus-owner)
         (throw (IllegalStateException. "Key input requires a focused node")))
-      (let [{:keys [held-key-texts caps-lock]} (keyboard-state scene)
+      (let [{:keys [held-key-texts caps-lock] :as state} (input-state scene)
             press (= KeyEvent/KEY_PRESSED event-type)
             caps-lock (if (and press (= KeyCode/CAPS code) (not (contains? held-key-texts code)))
                         (not caps-lock)
@@ -490,9 +507,10 @@
             text (if press
                    (us-key-text code (contains? held-key-texts KeyCode/SHIFT) caps-lock)
                    (get held-key-texts code ""))]
-        (.put scene->keyboard-state scene
-              {:held-key-texts (if press (assoc held-key-texts code text) (dissoc held-key-texts code))
-               :caps-lock caps-lock})
+        (.put scene->input-state scene
+              (assoc state
+                     :held-key-texts (if press (assoc held-key-texts code text) (dissoc held-key-texts code))
+                     :caps-lock caps-lock))
         (let [modifiers (held-modifier-codes scene)]
           (SceneHelper/processKeyEvent scene (key-event event-type text code modifiers))
           (when (and press (not (empty? text))
@@ -504,22 +522,20 @@
   "Press a virtual US keyboard key; return the focus owner at the press.
 
   el is a Window, Scene, or synthetic root; omission requires one open window.
-  Events follow the scene's current focus owner; throws if none exists.
-  Desktop focus is not required. key is a javafx.scene.input.KeyCode or its
+  Input follows the scene's current focus owner; throws if none exists.
+  key is a javafx.scene.input.KeyCode or its
   kebab-case keyword, e.g. :a, :digit1, :enter, :shift, :control, :meta.
   Pair with key-release!, or use key-tap!/key-chord! for complete sequences.
 
-  Virtual keyboard behavior (independent of host layout and locale):
-  - Letters type lowercase; Shift uppercases them. :caps toggles Caps Lock
-    for letters, with Shift reversing it. Digits and punctuation use US
-    Shift pairs, e.g. :digit1 -> 1/!, :minus -> -/_, :slash -> /?.
-  - Printable keys emit KEY_PRESSED then KEY_TYPED, except while Control,
-    Alt, or Meta is held. Navigation, function, modifier, Enter, and Tab keys
-    emit no typed text. Unmapped keys still emit press/release events.
-  - Numpad digits and arithmetic keys always type their numeric characters.
-    Num Lock, Alt/Option character mappings, dead keys, and IME are not simulated.
-  - Held keys and Caps Lock are tracked per scene. Repeated presses repeat
-    input; a held Caps Lock key toggles only once. There is no repeat timer.
+  Uses a US layout regardless of the host layout. Printable keys type text
+  unless Control, Alt, or Meta is held. Shift affects case and punctuation;
+  :caps toggles Caps Lock for letters, with Shift reversing it. Numpad digits
+  always type digits. Num Lock, Alt/Option character
+  mappings, dead keys, and IME are not supported.
+
+  Keys stay held until released. Held modifiers apply to later keyboard and
+  mouse input in the same scene. Holding a key does not repeat automatically; call
+  again to repeat. Caps Lock toggles only once until released and pressed again.
 
     (p/key-press! window :shift)
     (p/mouse-click! window [50 50] :primary)
@@ -537,8 +553,7 @@
   Release follows the scene's current focus owner, which may differ from the
   press target. Throws if there is no focus owner; desktop focus is not required.
 
-  Emits KEY_RELEASED with the text from the key's last press, or empty text
-  if it was not pressed. Clears the released key's modifier flag before dispatch.
+  Releasing a modifier stops applying it to later input. Other keys remain held.
   See key-press! for virtual keyboard rules; use key-tap! for a complete tap.
 
     (p/key-release! window :shift)"
@@ -556,9 +571,8 @@
   text, Shift/Caps Lock affect case, and Control/Alt/Meta suppress typed text.
   See key-press! for full keyboard rules and key-chord! for combinations.
 
-  Both events run on the JavaFX thread in the same scene, following its current
-  focus owner (which can change after Tab). Throws if no focus owner exists;
-  desktop focus is not required.
+  Input follows the scene's current focus owner, which can change after Tab.
+  Throws if no focus owner exists; desktop focus is not required.
 
     (p/key-tap! :enter)
     (p/key-tap! window :a)"
@@ -578,9 +592,9 @@
   keywords. Put modifiers first. Uses the virtual US keyboard; see key-press!
   for its rules. Use :meta for Command shortcuts on macOS, :control for Ctrl.
 
-  The sequence runs on the JavaFX thread in one scene, following its current
-  focus owner. Throws if no focus owner exists; desktop focus is not required.
-  Keys in the chord end released; other held keys retain their state.
+  Input follows the scene's current focus owner. Throws if no focus owner
+  exists; desktop focus is not required. Keys in the chord end released;
+  other keys remain held.
 
     (p/key-chord! window [:shift :digit1]) ; type !
     (p/key-chord! window [:control :shift :z])
@@ -599,8 +613,10 @@
 
 ;; region mouse input
 
-(defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button held-modifier-codes]
+(defn- mouse-event [event-type ^Point2D scene-point ^Point2D screen-point ^MouseButton button held-modifier-codes held-buttons]
   (MouseEvent.
+    #_source nil
+    #_target nil
     #_event-type event-type
     #_x (.getX scene-point)
     #_y (.getY scene-point)
@@ -612,45 +628,82 @@
     #_control-down (contains? held-modifier-codes KeyCode/CONTROL)
     #_alt-down (contains? held-modifier-codes KeyCode/ALT)
     #_meta-down (contains? held-modifier-codes KeyCode/META)
-    #_primary-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
-                               (identical? MouseButton/PRIMARY button))
-    #_middle-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
-                              (identical? MouseButton/MIDDLE button))
-    #_secondary-button-down (and (= MouseEvent/MOUSE_PRESSED event-type)
-                                 (identical? MouseButton/SECONDARY button))
+    #_primary-button-down (contains? held-buttons MouseButton/PRIMARY)
+    #_middle-button-down (contains? held-buttons MouseButton/MIDDLE)
+    #_secondary-button-down (contains? held-buttons MouseButton/SECONDARY)
+    #_back-button-down (contains? held-buttons MouseButton/BACK)
+    #_forward-button-down (contains? held-buttons MouseButton/FORWARD)
     #_synthesized false
     #_popup-trigger false
     #_still-since-press false
     #_pick-result (PickResult. nil (.getX scene-point) (.getY scene-point))))
 
+(defn- input-position [^Scene scene position]
+  (let [window (.getWindow scene)]
+    (when-not (and window (.isShowing window))
+      (throw (IllegalStateException. "Mouse input requires a scene in a showing window")))
+    (when-not (and (vector? position) (= 2 (count position))
+                   (every? finite-number? position))
+      (throw (IllegalArgumentException. "Mouse position must be a vector [x y] of finite numbers")))
+    (let [[x y] position]
+      [(Point2D. (double x) (double y))
+       (Point2D. (+ (.getX window) (.getX scene) (double x))
+                 (+ (.getY window) (.getY scene) (double y)))])))
+
 (defn- dispatch-mouse! [el position event-type button]
   (on-ui-thread
     (let [scene (input-scene el)
-          window (.getWindow scene)
-          _ (when-not (and window (.isShowing window))
-              (throw (IllegalStateException. "Mouse input requires a scene in a showing window")))
-          _ (when-not (and (vector? position) (= 2 (count position))
-                           (every? finite-number? position))
-              (throw (IllegalArgumentException. "Mouse position must be a vector [x y] of finite numbers")))
-          [x y] position
-          scene-point (Point2D. (double x) (double y))
-          screen-point (Point2D. (+ (.getX window) (.getX scene) (double x))
-                                 (+ (.getY window) (.getY scene) (double y)))
+          [scene-point screen-point] (input-position scene position)
+          {:keys [held-mouse-buttons] :as state} (input-state scene)
+          move (= MouseEvent/MOUSE_MOVED event-type)
           button (cond
+                   move (or (peek held-mouse-buttons) MouseButton/NONE)
                    (instance? MouseButton button) button
                    (keyword? button) (MouseButton/valueOf (enum-keyword->name button))
                    :else (throw (IllegalArgumentException. (str "Unsupported mouse button: " button))))
-          event (mouse-event event-type scene-point screen-point button (held-modifier-codes scene))
+          _ (when (and (not move) (= MouseButton/NONE button))
+              (throw (IllegalArgumentException. "Cannot press or release MouseButton/NONE")))
+          held-mouse-buttons (cond
+                               move held-mouse-buttons
+                               (= MouseEvent/MOUSE_PRESSED event-type)
+                               (conj (filterv #(not= button %) held-mouse-buttons) button)
+                               :else (filterv #(not= button %) held-mouse-buttons))
+          event-type (if (and move (seq held-mouse-buttons)) MouseEvent/MOUSE_DRAGGED event-type)
+          event (mouse-event event-type scene-point screen-point button (held-modifier-codes scene) (set held-mouse-buttons))
           captured-target (atom nil)
           handler (reify EventHandler
                     (handle [_ event]
                       (swap! captured-target #(or % (.getTarget event)))))]
+      (.put scene->input-state scene (assoc state :held-mouse-buttons held-mouse-buttons))
       (.addEventFilter scene event-type handler)
       (try
         (SceneHelper/processMouseEvent scene event)
         @captured-target
         (finally
           (.removeEventFilter scene event-type handler))))))
+
+(defn mouse-move!
+  "Move the virtual mouse to position [x y]; return the target or nil.
+
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  The scene must be in a showing window; desktop focus is not required.
+  position is a vector of two finite numbers in scene logical pixels from the
+  content area's top-left. Use point to obtain coordinates from a node.
+
+  Holding a mouse button drags the original press target. Held keyboard
+  modifiers apply. Input in one scene does not affect another.
+
+  Movement is instantaneous and does not move the desktop pointer.
+  Call repeatedly for intermediate positions. Outside the scene, the target
+  can be nil; dragging continues to target the original press target.
+
+    (p/mouse-press! window [50 50] :primary)
+    (p/mouse-move! window [150 100])
+    (p/mouse-release! window [150 100] :primary)"
+  ([position]
+   (mouse-move! ROOT position))
+  ([el position]
+   (dispatch-mouse! el position MouseEvent/MOUSE_MOVED nil)))
 
 (defn mouse-press!
   "Press a mouse button at position [x y]; return the event target or nil.
@@ -661,8 +714,9 @@
   from the content area's top-left (excluding window decorations). button is
   :primary, :middle, :secondary, or a javafx.scene.input.MouseButton.
 
-  JavaFX picks the target at the position. Held virtual keyboard modifiers
-  apply. Pair with mouse-release!, or use mouse-click! for a complete click.
+  Presses at the given position, with held keyboard modifiers applied.
+  Buttons stay held across calls, including mouse-move!, until released.
+  Pair with mouse-release!, or use mouse-click! for a complete click.
   point converts a relative position within a node to scene coordinates.
 
     (p/mouse-press! window (p/point node 0.5 0.5) :primary)"
@@ -680,7 +734,8 @@
   content area's top-left. button is :primary, :middle, :secondary, or a
   javafx.scene.input.MouseButton. Use point to obtain coordinates from a node.
 
-  JavaFX keeps the press target through release, even at a different position.
+  Release goes to the original press target, even at a different position.
+  Other buttons remain held.
   Use mouse-click! for a press/release pair at one position.
 
     (p/mouse-release! window [50 50] :primary)"
@@ -698,8 +753,7 @@
   top-left, excluding window decorations. Use point to locate a node.
   button is :primary, :middle, :secondary, or a javafx.scene.input.MouseButton.
 
-  Both events run on the JavaFX thread in the same scene. JavaFX picks the
-  target at the position, with any held virtual keyboard modifiers applied.
+  Clicks at the given position, with held keyboard modifiers applied.
 
     (p/mouse-click! [50 50] :primary)
     (p/mouse-click! window (p/point node 0.5 0.5) :primary)"
@@ -710,5 +764,111 @@
      (let [scene (input-scene el)]
        (mouse-press! scene position button)
        (mouse-release! scene position button)))))
+
+;; endregion
+
+;; region scroll input
+
+;; SceneHelper has no scroll entry point. The scene's peer listener provides
+;; normal picking (including SubScenes) and dispatch without moving the mouse.
+;; Scrolling uses state on the enclosing Scene, so a fresh listener can be used
+;; for each call; listener fields added in newer releases serve other operations.
+(def ^:private scene-peer-listener-constructor
+  (delay
+    (doto (.getDeclaredConstructor (Class/forName "javafx.scene.Scene$ScenePeerListener")
+                                   (into-array Class [Scene]))
+      (.setAccessible true))))
+
+(defn scroll!
+  "Scroll at position [x y] by dx and dy logical pixels; return the target or nil.
+
+  el is a Window, Scene, or synthetic root; omission requires one open window.
+  The scene must be in a showing window; desktop focus is not required.
+  position is a vector of two finite numbers in scene logical pixels from the
+  content area's top-left. Use point to obtain coordinates from a node.
+
+  dx and dy are finite numbers; fractions are allowed. Negative dx scrolls
+  right, negative dy scrolls down; positive values reverse those directions.
+  Held keyboard modifiers apply. The control determines the actual movement
+  and stops at its scroll limits. Scrolling is immediate, without momentum,
+  and does not move the desktop pointer.
+
+    (p/scroll! window (p/point list-view 0.5 0.5) 0 -100)
+    (p/scroll! [150 150] -100 0)"
+  ([position dx dy]
+   (scroll! ROOT position dx dy))
+  ([el position dx dy]
+   (on-ui-thread
+     (let [scene (input-scene el)
+           [^Point2D scene-point ^Point2D screen-point] (input-position scene position)
+           _ (when-not (and (finite-number? dx) (finite-number? dy))
+               (throw (IllegalArgumentException. "Scroll deltas must be finite numbers")))
+           modifiers (held-modifier-codes scene)
+           ^Constructor constructor @scene-peer-listener-constructor
+           ^TKSceneListener listener (.newInstance constructor (object-array [scene]))
+           captured-target (atom nil)
+           handler (reify EventHandler
+                     (handle [_ event]
+                       (swap! captured-target #(or % (.getTarget event)))))]
+       (.addEventFilter scene ScrollEvent/SCROLL handler)
+       (try
+         (.scrollEvent listener
+                       ScrollEvent/SCROLL
+                       #_scroll-x (double dx) #_scroll-y (double dy)
+                       #_total-x 0.0 #_total-y 0.0
+                       #_multiplier-x 1.0 #_multiplier-y 1.0
+                       #_touch-count 0
+                       #_text-x 0 #_text-y 0 #_default-text-x 0 #_default-text-y 0
+                       (.getX scene-point) (.getY scene-point)
+                       (.getX screen-point) (.getY screen-point)
+                       #_shift (contains? modifiers KeyCode/SHIFT)
+                       #_control (contains? modifiers KeyCode/CONTROL)
+                       #_alt (contains? modifiers KeyCode/ALT)
+                       #_meta (contains? modifiers KeyCode/META)
+                       #_direct false #_inertia false)
+         @captured-target
+         (finally
+           (.removeEventFilter scene ScrollEvent/SCROLL handler)))))))
+
+;; endregion
+
+;; region screenshot
+
+(defn screenshot!
+  "Save a screenshot to a temporary PNG; return its absolute path as a string.
+
+  el is a Node, Scene, Window, or synthetic root. Omitting it requires exactly
+  one open window. A window captures its scene content, excluding decorations
+  and separate popup windows. A node captures itself and its children, without
+  surrounding content or overlapping siblings, on a transparent background.
+
+    (p/screenshot!)
+    (p/screenshot! window)
+    (p/screenshot! (p/one window \"#chart\"))"
+  ([]
+   (screenshot! ROOT))
+  ([el]
+   (let [buffered
+         (on-ui-thread
+           (let [^WritableImage image
+                 (if (instance? Node el)
+                   (.snapshot ^Node el (doto (SnapshotParameters.) (.setFill Color/TRANSPARENT)) nil)
+                   (.snapshot (input-scene el) nil))
+                 width (int (.getWidth image))
+                 height (int (.getHeight image))
+                 pixels (int-array (* width height))
+                 buffered (BufferedImage. width height BufferedImage/TYPE_INT_ARGB)]
+             (.getPixels (.getPixelReader image) 0 0 width height
+                         (PixelFormat/getIntArgbInstance) pixels 0 width)
+             (.setRGB buffered 0 0 width height pixels 0 width)
+             buffered))
+         file (File/createTempFile "plorer-" ".png")]
+     (try
+       (when-not (ImageIO/write ^BufferedImage buffered "png" file)
+         (throw (IOException. "No PNG image writer available")))
+       (.getAbsolutePath file)
+       (catch Throwable t
+         (.delete file)
+         (throw t))))))
 
 ;; endregion

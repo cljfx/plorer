@@ -1,16 +1,21 @@
 (ns cljfx.plorer-test
   (:require [cljfx.plorer :as plorer]
             [clojure.test :as t :refer [deftest is testing]])
-  (:import [java.util Locale]
+  (:import [java.awt.image BufferedImage]
+           [java.io File]
+           [java.util Locale]
            [javafx.application Platform]
            [javafx.event EventHandler]
            [javafx.scene Group Scene SubScene]
-           [javafx.scene.control TextField]
-           [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent]
-           [javafx.scene.layout VBox]
-           [javafx.scene.shape Rectangle]
+           [javafx.scene.control ListView ScrollPane TextField]
+           [javafx.scene.control.skin VirtualFlow]
+           [javafx.scene.input KeyCode KeyEvent MouseButton MouseDragEvent MouseEvent ScrollEvent]
+           [javafx.scene.layout HBox VBox]
+           [javafx.scene.paint Color]
+           [javafx.scene.shape Circle Rectangle]
            [javafx.scene.text Text]
-           [javafx.stage Stage Window]))
+           [javafx.stage Stage Window]
+           [javax.imageio ImageIO]))
 
 (defn- start-fx-runtime! []
   (let [started? (promise)]
@@ -1229,6 +1234,383 @@
              @events))
       (finally
         (fx-sync #(.close stage))))))
+
+(defn- with-mouse-input [f]
+  (let [events (atom [])
+        [^Stage stage scene left right]
+        (fx-sync
+          (fn []
+            (let [left (Rectangle. 50.0 50.0)
+                  right (doto (Rectangle. 50.0 50.0) (.setTranslateX 100.0))
+                  scene (Scene. (group left right) 200.0 100.0)
+                  stage (doto (Stage.) (.setScene scene) (.setX -10000.0) (.show))]
+              (.requestFocus left)
+              (.addEventFilter scene MouseEvent/ANY
+                               (reify EventHandler
+                                 (handle [_ event]
+                                   (let [^MouseEvent event event]
+                                     (swap! events conj
+                                            {:type (.getEventType event)
+                                             :target (.getTarget event)
+                                             :pick (.getIntersectedNode (.getPickResult event))
+                                             :position [(.getSceneX event) (.getSceneY event)]
+                                             :button (.getButton event)
+                                             :primary (.isPrimaryButtonDown event)
+                                             :middle (.isMiddleButtonDown event)
+                                             :secondary (.isSecondaryButtonDown event)
+                                             :back (.isBackButtonDown event)
+                                             :forward (.isForwardButtonDown event)
+                                             :shift (.isShiftDown event)})))))
+              [stage scene left right])))]
+    (try
+      (f stage scene left right events)
+      (finally (fx-sync #(.close stage))))))
+
+(deftest mouse-move-picks-targets-and-generates-enter-exit
+  (with-mouse-input
+    (fn [stage scene left right events]
+      (is (= left (plorer/mouse-move! [25 25])))
+      (is (= right (plorer/mouse-move! stage [125 25])))
+      (is (= scene (plorer/mouse-move! scene [190 90])))
+      (is (nil? (plorer/mouse-move! stage [-10 -10])))
+      (is (= left (plorer/mouse-move! stage [25 25])))
+      (is (= [[left MouseButton/NONE] [right MouseButton/NONE]
+              [scene MouseButton/NONE] [left MouseButton/NONE]]
+             (mapv (juxt :target :button)
+                   (filter #(= MouseEvent/MOUSE_MOVED (:type %)) @events))))
+      (doseq [target [left right scene]
+              type (if (= target scene)
+                     [MouseEvent/MOUSE_ENTERED MouseEvent/MOUSE_EXITED]
+                     [MouseEvent/MOUSE_ENTERED_TARGET MouseEvent/MOUSE_EXITED_TARGET])]
+        (is (some #(and (= target (:target %)) (= type (:type %))) @events)))
+      (is (not-any? :primary @events)))))
+
+(deftest mouse-move-preserves-capture-and-detects-drag
+  (with-mouse-input
+    (fn [stage scene left right events]
+      (plorer/mouse-press! stage [25 25] :primary)
+      (is (= left (plorer/mouse-move! scene [25 25])))
+      (is (not-any? #(= MouseEvent/DRAG_DETECTED (:type %)) @events))
+      (is (= left (plorer/mouse-move! stage [125 25])))
+      (is (= left (plorer/mouse-move! stage [-10 -10])))
+      (is (= left (plorer/mouse-release! scene [-10 -10] :primary)))
+      (is (= [[left left [25.0 25.0]] [left right [125.0 25.0]] [left nil [-10.0 -10.0]]]
+             (mapv (juxt :target :pick :position)
+                   (filter #(= MouseEvent/MOUSE_DRAGGED (:type %)) @events))))
+      (is (= 1 (count (filter #(= MouseEvent/DRAG_DETECTED (:type %)) @events))))
+      (is (= right (plorer/mouse-move! scene [125 25])))
+      (is (= MouseEvent/MOUSE_MOVED (:type (last @events)))))))
+
+(deftest mouse-move-drives-node-drag-handler
+  (with-mouse-input
+    (fn [stage _ ^Rectangle left _ events]
+      (fx-sync
+        #(.setOnMouseDragged left
+                             (reify EventHandler
+                               (handle [_ event]
+                                 (.setTranslateX left (- (.getSceneX ^MouseEvent event) 25.0))))))
+      (plorer/mouse-press! stage [25 25] :primary)
+      (is (= left (plorer/mouse-move! stage [75 25])))
+      (is (= [75.0 25.0] (plorer/point left 0.5 0.5)))
+      (is (= left (plorer/mouse-release! stage [75 25] :primary)))
+      (is (some #(and (= MouseEvent/MOUSE_CLICKED (:type %)) (= left (:target %))) @events)))))
+
+(deftest mouse-move-generates-full-drag-target-events
+  (with-mouse-input
+    (fn [stage _ ^Rectangle left right events]
+      (fx-sync
+        #(.setOnDragDetected left
+                             (reify EventHandler
+                               (handle [_ _]
+                                 (.setMouseTransparent left true)
+                                 (.startFullDrag left)))))
+      (plorer/mouse-press! stage [25 25] :primary)
+      (plorer/mouse-move! stage [40 25])
+      (is (= left (plorer/mouse-move! stage [125 25])))
+      (is (= left (plorer/mouse-release! stage [125 25] :primary)))
+      (doseq [type [MouseDragEvent/MOUSE_DRAG_ENTERED_TARGET MouseDragEvent/MOUSE_DRAG_OVER
+                    MouseDragEvent/MOUSE_DRAG_RELEASED MouseDragEvent/MOUSE_DRAG_EXITED_TARGET]]
+        (is (some #(and (= right (:target %)) (= type (:type %))) @events))))))
+
+(deftest mouse-and-keyboard-updates-preserve-held-inputs
+  (with-mouse-input
+    (fn [stage scene left _ events]
+      (plorer/mouse-press! stage [25 25] :primary)
+      (plorer/key-press! scene :shift)
+      (plorer/mouse-press! scene [25 25] :secondary)
+      (plorer/mouse-press! scene [25 25] :secondary)
+      (plorer/mouse-move! stage [30 25])
+      (let [drag (last (filter #(= MouseEvent/MOUSE_DRAGGED (:type %)) @events))]
+        (is (= [MouseButton/SECONDARY true true true]
+               ((juxt :button :primary :secondary :shift) drag))))
+      (plorer/key-release! scene :shift)
+      (plorer/mouse-release! stage [30 25] :secondary)
+      (is (= left (plorer/mouse-move! scene [125 25])))
+      (let [drag (last (filter #(= MouseEvent/MOUSE_DRAGGED (:type %)) @events))]
+        (is (= [MouseButton/PRIMARY true false false]
+               ((juxt :button :primary :secondary :shift) drag))))
+      (let [release (last (filter #(= MouseEvent/MOUSE_RELEASED (:type %)) @events))]
+        (is (= [true false] ((juxt :primary :secondary) release))))
+      (plorer/mouse-release! stage [125 25] :primary)
+      (plorer/mouse-move! stage [25 25])
+      (is (= [MouseEvent/MOUSE_MOVED MouseButton/NONE false false]
+             ((juxt :type :button :primary :secondary) (last @events)))))))
+
+(deftest mouse-move-supports-every-button-and-isolates-scenes
+  (with-mouse-input
+    (fn [stage scene left _ events]
+      (with-mouse-input
+        (fn [other-stage _ other-left _ other-events]
+          (doseq [[button flag] [[MouseButton/PRIMARY :primary] [MouseButton/MIDDLE :middle]
+                                 [MouseButton/SECONDARY :secondary] [MouseButton/BACK :back]
+                                 [MouseButton/FORWARD :forward]]]
+            (plorer/mouse-press! stage [25 25] button)
+            (is (= other-left (plorer/mouse-move! other-stage [25 25])))
+            (is (= [MouseEvent/MOUSE_MOVED MouseButton/NONE false]
+                   ((juxt :type :button flag) (last @other-events))))
+            (is (= left (plorer/mouse-move! scene [30 25])))
+            (let [drag (last (filter #(= MouseEvent/MOUSE_DRAGGED (:type %)) @events))]
+              (is (= [button true] ((juxt :button flag) drag))))
+            (plorer/mouse-release! scene [30 25] button)))))))
+
+(deftest mouse-move-validates-input-without-losing-held-buttons
+  (is (thrown-with-msg? IllegalStateException #"exactly one open window"
+                        (plorer/mouse-move! [0 0])))
+  (with-mouse-input
+    (fn [^Stage stage scene left _ events]
+      (plorer/mouse-press! stage [25 25] :primary)
+      (doseq [position [nil [0] [0 0 0] '(0 0) [nil 0] [0 "0"] [Double/NaN 0] [0 Double/POSITIVE_INFINITY]]]
+        (is (thrown-with-msg? IllegalArgumentException #"Mouse position must be a vector"
+                              (plorer/mouse-move! stage position))))
+      (doseq [target [nil left :window]]
+        (is (thrown-with-msg? IllegalArgumentException #"Input target must be ROOT, a Window, or a Scene"
+                              (plorer/mouse-move! target [25 25]))))
+      (is (thrown-with-msg? IllegalArgumentException #"Cannot press or release"
+                            (plorer/mouse-press! stage [25 25] :none)))
+      (is (= left (plorer/mouse-move! stage [125 25])))
+      (is (some #(= MouseEvent/MOUSE_DRAGGED (:type %)) @events))
+      (plorer/mouse-release! stage [125 25] :primary)
+      (fx-sync #(.hide stage))
+      (is (thrown-with-msg? IllegalStateException #"Mouse input requires a scene in a showing window"
+                            (plorer/mouse-move! scene [25 25]))))))
+
+(defn- record-scroll-events! [^Scene scene events]
+  (fx-sync
+    #(.addEventFilter scene ScrollEvent/ANY
+                      (reify EventHandler
+                        (handle [_ event]
+                          (let [^ScrollEvent event event]
+                            (swap! events conj
+                                   {:type (.getEventType event)
+                                    :target (.getTarget event)
+                                    :position [(.getSceneX event) (.getSceneY event)]
+                                    :delta [(.getDeltaX event) (.getDeltaY event)]
+                                    :modifiers (cond-> #{}
+                                                 (.isShiftDown event) (conj :shift)
+                                                 (.isControlDown event) (conj :control)
+                                                 (.isAltDown event) (conj :alt)
+                                                 (.isMetaDown event) (conj :meta))})))))))
+
+(deftest scroll-picks-at-position-without-disturbing-mouse-or-focus
+  (with-mouse-input
+    (fn [stage ^Scene scene left right mouse-events]
+      (let [events (atom [])]
+        (record-scroll-events! scene events)
+        (plorer/mouse-move! stage [25 25])
+        (plorer/mouse-press! stage [25 25] :primary)
+        (let [before @mouse-events]
+          (is (= right (plorer/scroll! [125 25] -0.5 -100)))
+          (is (= left (plorer/scroll! scene [25 25] 80 100)))
+          (is (= scene (plorer/scroll! stage [190 90] 0 0)))
+          (is (= before @mouse-events)))
+        (is (= left (fx-sync #(.getFocusOwner scene))))
+        (is (= [{:type ScrollEvent/SCROLL :target right :position [125.0 25.0]
+                 :delta [-0.5 -100.0] :modifiers #{}}
+                {:type ScrollEvent/SCROLL :target left :position [25.0 25.0]
+                 :delta [80.0 100.0] :modifiers #{}}
+                {:type ScrollEvent/SCROLL :target scene :position [190.0 90.0]
+                 :delta [0.0 0.0] :modifiers #{}}]
+               @events))
+        (is (= left (plorer/mouse-move! stage [125 25])))
+        (is (= left (plorer/mouse-release! stage [125 25] :primary)))))))
+
+(deftest scroll-preserves-modifiers-and-isolates-scenes
+  (with-mouse-input
+    (fn [stage scene _ _ _]
+      (let [events (atom [])]
+        (record-scroll-events! scene events)
+        (doseq [key [:shift :control :alt :meta]] (plorer/key-press! stage key))
+        (with-mouse-input
+          (fn [other-stage other-scene _ _ _]
+            (let [other-events (atom [])]
+              (record-scroll-events! other-scene other-events)
+              (is (thrown-with-msg? IllegalStateException #"exactly one open window"
+                                    (plorer/scroll! [25 25] 0 -10)))
+              (plorer/scroll! other-stage [25 25] 0 -10)
+              (is (= #{} (:modifiers (last @other-events))))
+              (plorer/scroll! stage [25 25] 0 -10)
+              (plorer/scroll! scene [25 25] 0 -10)
+              (is (= [#{:shift :control :alt :meta} #{:shift :control :alt :meta}]
+                     (mapv :modifiers @events))))))
+        (doseq [key [:meta :alt :control :shift]] (plorer/key-release! scene key))
+        (plorer/scroll! stage [25 25] 0 -10)
+        (is (= #{} (:modifiers (last @events))))))))
+
+(deftest scroll-uses-pixels-in-scroll-panes-and-list-views
+  (let [[^Stage stage ^Scene scene ^ScrollPane pane ^Rectangle content ^ListView list-view]
+        (fx-sync
+          (fn []
+            (let [content (Rectangle. 1200.0 1500.0)
+                  pane (doto (ScrollPane. content) (.setPrefSize 300.0 300.0))
+                  list-view (doto (ListView.) (.setPrefSize 300.0 300.0) (.setFixedCellSize 24.0))
+                  root (HBox.)
+                  scene (Scene. root 600.0 300.0)]
+              (doseq [i (range 100)] (.add (.getItems list-view) (str "Row " i)))
+              (.add (.getChildren root) pane)
+              (.add (.getChildren root) list-view)
+              (let [stage (doto (Stage.) (.setScene scene) (.setX -10000.0) (.show))]
+                (.applyCss root)
+                (.layout root)
+                [stage scene pane content list-view]))))
+        content-position #(fx-sync (fn []
+                                     (.layout (.getRoot scene))
+                                     (let [point (.localToScene content 0.0 0.0)]
+                                       [(.getX point) (.getY point)])))
+        first-row #(fx-sync (fn []
+                              (let [flow ^VirtualFlow (.lookup list-view ".virtual-flow")]
+                                (.getIndex (.getFirstVisibleCell flow)))))]
+    (try
+      (let [before (content-position)]
+        (is (= content (plorer/scroll! stage [150 150] -80 -100)))
+        (is (= [-80.0 -100.0] (mapv - (content-position) before)))
+        (plorer/scroll! stage [150 150] 80 100)
+        (is (= before (content-position)))
+        (plorer/scroll! stage [150 150] -0.5 -0.5)
+        (is (= [-0.5 -0.5] (mapv - (content-position) before))))
+      (plorer/scroll! stage (plorer/point list-view 0.5 0.5) 0 -100)
+      (is (= 4 (first-row)))
+      (plorer/scroll! stage (plorer/point list-view 0.5 0.5) 0 100)
+      (is (= 0 (first-row)))
+      (plorer/scroll! stage [150 150] -1e6 -1e6)
+      (is (= [1.0 1.0] (fx-sync #(vector (.getHvalue pane) (.getVvalue pane)))))
+      (let [at-end (content-position)]
+        (plorer/scroll! stage [150 150] -100 -100)
+        (is (= at-end (content-position))))
+      (plorer/scroll! stage [150 150] 1e6 1e6)
+      (is (= [0.0 0.0] (fx-sync #(vector (.getHvalue pane) (.getVvalue pane)))))
+      (finally (fx-sync #(.close stage))))))
+
+(deftest scroll-picks-inside-nested-subscenes
+  (let [[^Stage stage node]
+        (fx-sync
+          (fn []
+            (let [node (Rectangle. 20.0 20.0)
+                  inner (doto (SubScene. (group node) 100.0 100.0) (.setTranslateX 20.0))
+                  outer (doto (SubScene. (group inner) 200.0 200.0) (.setTranslateY 100.0))]
+              [(doto (Stage.) (.setX -10000.0)
+                     (.setScene (Scene. (group outer) 300.0 300.0)) (.show)) node])))]
+    (try
+      (is (= node (plorer/scroll! stage (plorer/point node 0.5 0.5) 0 -100)))
+      (finally (fx-sync #(.close stage))))))
+
+(deftest scroll-validates-targets-positions-and-deltas
+  (is (thrown-with-msg? IllegalStateException #"exactly one open window"
+                        (plorer/scroll! [0 0] 0 -10)))
+  (with-mouse-input
+    (fn [^Stage stage scene left _ _]
+      (let [events (atom [])]
+        (record-scroll-events! scene events)
+        (doseq [target [nil left :window]]
+          (is (thrown-with-msg? IllegalArgumentException #"Input target must be"
+                                (plorer/scroll! target [25 25] 0 -10))))
+        (doseq [position [nil [0] [0 0 0] '(0 0) [nil 0] [0 "0"] [Double/NaN 0] [0 Double/POSITIVE_INFINITY]]]
+          (is (thrown-with-msg? IllegalArgumentException #"Mouse position must be"
+                                (plorer/scroll! stage position 0 -10))))
+        (doseq [delta [nil "1" Double/NaN Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY]]
+          (is (thrown-with-msg? IllegalArgumentException #"Scroll deltas must be finite numbers"
+                                (plorer/scroll! stage [25 25] delta 0)))
+          (is (thrown-with-msg? IllegalArgumentException #"Scroll deltas must be finite numbers"
+                                (plorer/scroll! stage [25 25] 0 delta))))
+        (is (empty? @events))
+        (is (= left (plorer/scroll! stage [25 25] 0 -10)))
+        (fx-sync #(.hide stage))
+        (is (thrown-with-msg? IllegalStateException #"showing window"
+                              (plorer/scroll! scene [25 25] 0 -10)))))))
+
+(defn- with-screenshot [capture f]
+  (let [path (capture)
+        file (File. ^String path)]
+    (try
+      (is (string? path))
+      (is (.isAbsolute file))
+      (is (.isFile file))
+      (let [image (ImageIO/read file)]
+        (is (some? image))
+        (when image (f path image)))
+      (finally (.delete file)))))
+
+(deftest screenshot-captures-window-scene-and-default-window
+  (with-mouse-input
+    (fn [stage scene _ _ _]
+      (let [paths (atom [])]
+        (doseq [capture [#(plorer/screenshot!)
+                         #(plorer/screenshot! stage)
+                         #(plorer/screenshot! scene)
+                         #(plorer/screenshot! (:el (plorer/tree :depth 0)))]]
+          (with-screenshot capture
+            (fn [path ^BufferedImage image]
+              (swap! paths conj path)
+              (is (= [200 100] [(.getWidth image) (.getHeight image)]))
+              (is (= (unchecked-int 0xff000000) (.getRGB image 25 25)))
+              (is (= (unchecked-int 0xffffffff) (.getRGB image 190 90))))))
+        (is (= 4 (count (distinct @paths))))))))
+
+(deftest screenshot-captures-node-with-transparency-and-current-content
+  (let [[^Stage stage ^Circle node]
+        (fx-sync
+          (fn []
+            (let [node (Circle. 10.0 10.0 10.0 Color/RED)
+                  cover (Rectangle. 20.0 20.0 Color/BLUE)
+                  scene (Scene. (group node cover) 100.0 100.0)]
+              [(doto (Stage.) (.setX -10000.0) (.setScene scene) (.show)) node])))]
+    (try
+      (with-screenshot #(plorer/screenshot! stage)
+        (fn [_ ^BufferedImage image]
+          (is (= (unchecked-int 0xff0000ff) (.getRGB image 10 10)))))
+      (with-screenshot #(plorer/screenshot! node)
+        (fn [first-path ^BufferedImage image]
+          (is (= [20 20] [(.getWidth image) (.getHeight image)]))
+          (is (= 0 (.getRGB image 0 0)))
+          (is (= (unchecked-int 0xffff0000) (.getRGB image 10 10)))
+          (fx-sync #(.setFill node Color/LIME))
+          (with-screenshot #(plorer/screenshot! node)
+            (fn [second-path ^BufferedImage second-image]
+              (is (not= first-path second-path))
+              (is (= (unchecked-int 0xff00ff00) (.getRGB second-image 10 10)))
+              (is (= (unchecked-int 0xffff0000)
+                     (.getRGB (ImageIO/read (File. ^String first-path)) 10 10)))))))
+      (finally (fx-sync #(.close stage))))))
+
+(deftest screenshot-does-not-require-a-showing-window
+  (let [scene (fx-sync #(Scene. (group (Rectangle. 20.0 30.0 Color/RED)) 40.0 50.0))]
+    (with-screenshot #(plorer/screenshot! scene)
+      (fn [_ ^BufferedImage image]
+        (is (= [40 50] [(.getWidth image) (.getHeight image)]))
+        (is (= (unchecked-int 0xffff0000) (.getRGB image 10 10)))))))
+
+(deftest screenshot-validates-targets-and-default-window-count
+  (is (thrown-with-msg? IllegalStateException #"exactly one open window"
+                        (plorer/screenshot!)))
+  (doseq [el [nil :window "window"]]
+    (is (thrown? IllegalArgumentException (plorer/screenshot! el))))
+  (is (thrown-with-msg? IllegalStateException #"window with a scene"
+                        (plorer/screenshot! (fx-sync #(Stage.)))))
+  (with-mouse-input
+    (fn [_ _ _ _ _]
+      (with-mouse-input
+        (fn [_ _ _ _ _]
+          (is (thrown-with-msg? IllegalStateException #"exactly one open window"
+                                (plorer/screenshot!))))))))
 
 (defn test-ns-hook []
   (start-fx-runtime!)

@@ -47,11 +47,12 @@
            [javafx.beans.value ObservableValue]
            [javafx.collections ObservableList]
            [javafx.event EventHandler]
-           [javafx.geometry Point2D]
+           [javafx.geometry Point2D Rectangle2D]
            [javafx.scene Node Parent Scene SnapshotParameters SubScene]
            [javafx.scene.image PixelFormat WritableImage]
            [javafx.scene.input KeyCode KeyEvent MouseButton MouseEvent PickResult ScrollEvent]
            [javafx.scene.paint Color]
+           [javafx.scene.transform Scale]
            [javafx.stage Window]
            [javax.imageio ImageIO]))
 
@@ -850,10 +851,28 @@
   ([el]
    (let [buffered
          (on-ui-thread
-           (let [^WritableImage image
-                 (if (instance? Node el)
-                   (.snapshot ^Node el (doto (SnapshotParameters.) (.setFill Color/TRANSPARENT)) nil)
-                   (.snapshot (input-scene el) nil))
+           (let [node (when (instance? Node el) ^Node el)
+                 scene (if node (.getScene ^Node node) (input-scene el))
+                 window (some-> scene .getWindow)
+                 scale-x (if window (.getOutputScaleX window) 1.0)
+                 scale-y (if window (.getOutputScaleY window) 1.0)
+                 params (doto (SnapshotParameters.)
+                          (.setTransform (Scale. scale-x scale-y)))
+                 ^WritableImage image
+                 (if node
+                   (.snapshot ^Node node (doto params (.setFill Color/TRANSPARENT)) nil)
+                   (do
+                     (when (or (zero? (.getWidth scene)) (zero? (.getHeight scene)))
+                       (SceneHelper/preferredSize scene))
+                     (.snapshot (.getRoot scene)
+                                (doto params
+                                  (.setFill (.getFill scene))
+                                  (.setCamera (SceneHelper/getEffectiveCamera scene))
+                                  (.setDepthBuffer (.isDepthBuffer scene))
+                                  (.setViewport (Rectangle2D. 0.0 0.0
+                                                              (* scale-x (.getWidth scene))
+                                                              (* scale-y (.getHeight scene)))))
+                                nil)))
                  width (int (.getWidth image))
                  height (int (.getHeight image))
                  pixels (int-array (* width height))

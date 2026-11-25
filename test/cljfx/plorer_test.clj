@@ -1555,7 +1555,8 @@
 (deftest screenshot-captures-window-scene-and-default-window
   (with-mouse-input
     (fn [stage scene _ _ _]
-      (let [paths (atom [])]
+      (let [paths (atom [])
+            [scale-x scale-y] (fx-sync #(vector (.getOutputScaleX ^Window stage) (.getOutputScaleY ^Window stage)))]
         (doseq [capture [#(plorer/screenshot!)
                          #(plorer/screenshot! stage)
                          #(plorer/screenshot! scene)
@@ -1563,9 +1564,10 @@
           (with-screenshot capture
             (fn [path ^BufferedImage image]
               (swap! paths conj path)
-              (is (= [200 100] [(.getWidth image) (.getHeight image)]))
-              (is (= (unchecked-int 0xff000000) (.getRGB image 25 25)))
-              (is (= (unchecked-int 0xffffffff) (.getRGB image 190 90))))))
+              (is (= [(int (Math/ceil (* 200 scale-x))) (int (Math/ceil (* 100 scale-y)))]
+                     [(.getWidth image) (.getHeight image)]))
+              (is (= (unchecked-int 0xff000000) (.getRGB image (int (* 25 scale-x)) (int (* 25 scale-y)))))
+              (is (= (unchecked-int 0xffffffff) (.getRGB image (int (* 190 scale-x)) (int (* 90 scale-y))))))))
         (is (= 4 (count (distinct @paths))))))))
 
 (deftest screenshot-captures-node-with-transparency-and-current-content
@@ -1577,21 +1579,25 @@
                   scene (Scene. (group node cover) 100.0 100.0)]
               [(doto (Stage.) (.setX -10000.0) (.setScene scene) (.show)) node])))]
     (try
-      (with-screenshot #(plorer/screenshot! stage)
-        (fn [_ ^BufferedImage image]
-          (is (= (unchecked-int 0xff0000ff) (.getRGB image 10 10)))))
-      (with-screenshot #(plorer/screenshot! node)
-        (fn [first-path ^BufferedImage image]
-          (is (= [20 20] [(.getWidth image) (.getHeight image)]))
-          (is (= 0 (.getRGB image 0 0)))
-          (is (= (unchecked-int 0xffff0000) (.getRGB image 10 10)))
-          (fx-sync #(.setFill node Color/LIME))
-          (with-screenshot #(plorer/screenshot! node)
-            (fn [second-path ^BufferedImage second-image]
-              (is (not= first-path second-path))
-              (is (= (unchecked-int 0xff00ff00) (.getRGB second-image 10 10)))
-              (is (= (unchecked-int 0xffff0000)
-                     (.getRGB (ImageIO/read (File. ^String first-path)) 10 10)))))))
+      (let [[scale-x scale-y] (fx-sync #(vector (.getOutputScaleX stage) (.getOutputScaleY stage)))
+            center-x (int (* 10 scale-x))
+            center-y (int (* 10 scale-y))]
+        (with-screenshot #(plorer/screenshot! stage)
+          (fn [_ ^BufferedImage image]
+            (is (= (unchecked-int 0xff0000ff) (.getRGB image center-x center-y)))))
+        (with-screenshot #(plorer/screenshot! node)
+          (fn [first-path ^BufferedImage image]
+            (is (= [(int (Math/ceil (* 20 scale-x))) (int (Math/ceil (* 20 scale-y)))]
+                   [(.getWidth image) (.getHeight image)]))
+            (is (= 0 (.getRGB image 0 0)))
+            (is (= (unchecked-int 0xffff0000) (.getRGB image center-x center-y)))
+            (fx-sync #(.setFill node Color/LIME))
+            (with-screenshot #(plorer/screenshot! node)
+              (fn [second-path ^BufferedImage second-image]
+                (is (not= first-path second-path))
+                (is (= (unchecked-int 0xff00ff00) (.getRGB second-image center-x center-y)))
+                (is (= (unchecked-int 0xffff0000)
+                       (.getRGB (ImageIO/read (File. ^String first-path)) center-x center-y))))))))
       (finally (fx-sync #(.close stage))))))
 
 (deftest screenshot-does-not-require-a-showing-window
@@ -1600,6 +1606,31 @@
       (fn [_ ^BufferedImage image]
         (is (= [40 50] [(.getWidth image) (.getHeight image)]))
         (is (= (unchecked-int 0xffff0000) (.getRGB image 10 10)))))))
+
+;; Scene captures preserve their origin, bounds and fill even when the root
+;; starts elsewhere or extends beyond the scene; unattached nodes remain at 1x.
+(deftest screenshot-preserves-offscreen-scene-bounds-and-node-transparency
+  (let [scene (fx-sync #(Scene. (group (doto (Rectangle. 10.0 20.0 20.0 30.0) (.setFill Color/RED)))))]
+    (with-screenshot #(plorer/screenshot! scene)
+      (fn [_ ^BufferedImage image]
+        (is (= [30 50] [(.getWidth image) (.getHeight image)]))
+        (is (= (unchecked-int 0xffffffff) (.getRGB image 0 0)))
+        (is (= (unchecked-int 0xffff0000) (.getRGB image 15 25))))))
+  (let [scene (fx-sync #(Scene. (group (Rectangle. 300.0 200.0 Color/RED)) 40.0 50.0))]
+    (with-screenshot #(plorer/screenshot! scene)
+      (fn [_ ^BufferedImage image]
+        (is (= [40 50] [(.getWidth image) (.getHeight image)]))
+        (is (= (unchecked-int 0xffff0000) (.getRGB image 39 49))))))
+  (let [scene (fx-sync #(doto (Scene. (group (Rectangle. 10.0 10.0 Color/RED)) 40.0 50.0)
+                          (.setFill Color/TRANSPARENT)))]
+    (with-screenshot #(plorer/screenshot! scene)
+      (fn [_ ^BufferedImage image]
+        (is (= 0 (.getRGB image 39 49))))))
+  (with-screenshot #(plorer/screenshot! (fx-sync (fn [] (Circle. 10.0 10.0 10.0 Color/RED))))
+    (fn [_ ^BufferedImage image]
+      (is (= [20 20] [(.getWidth image) (.getHeight image)]))
+      (is (= 0 (.getRGB image 0 0)))
+      (is (= (unchecked-int 0xffff0000) (.getRGB image 10 10))))))
 
 (deftest screenshot-validates-targets-and-default-window-count
   (is (thrown-with-msg? IllegalStateException #"exactly one open window"
